@@ -1,0 +1,159 @@
+package clashapi
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+
+	"github.com/bihua-university/livery/internal/model"
+)
+
+func newMockClient(handler http.Handler) (*Client, func()) {
+	srv := httptest.NewServer(handler)
+	host, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	return New(host, port, "secret123"), srv.Close
+}
+
+func TestClientProxiesAndSelection(t *testing.T) {
+	selected := "HK-01"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxies", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret123" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"proxies": map[string]any{
+				"Proxy": map[string]any{
+					"name": "Proxy",
+					"type": "Selector",
+					"now":  selected,
+					"all":  []string{"HK-01", "JP-01"},
+				},
+				"HK-01": map[string]any{
+					"name":    "HK-01",
+					"type":    "VLESS",
+					"udp":     true,
+					"history": []map[string]int{{"delay": 42}},
+				},
+				"JP-01": map[string]any{
+					"name":    "JP-01",
+					"type":    "Trojan",
+					"udp":     true,
+					"history": []map[string]int{{"delay": 88}},
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/proxies/Proxy", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		selected = body["name"]
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/proxies/HK-01/delay", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]int{"delay": 37})
+	})
+
+	c, closeFn := newMockClient(mux)
+	defer closeFn()
+
+	ctx := context.Background()
+	groups, nodes, err := c.GetProxies(ctx)
+	if err != nil {
+		t.Fatalf("GetProxies: %v", err)
+	}
+	if len(groups) != 1 || groups[0].Now != "HK-01" {
+		t.Fatalf("unexpected groups: %+v", groups)
+	}
+	if nodes["HK-01"].Delay != 42 {
+		t.Fatalf("unexpected delay: %+v", nodes["HK-01"])
+	}
+
+	if err := c.SelectProxy(ctx, "Proxy", "JP-01"); err != nil {
+		t.Fatalf("SelectProxy: %v", err)
+	}
+	groups, _, err = c.GetProxies(ctx)
+	if err != nil || groups[0].Now != "JP-01" {
+		t.Fatalf("expected JP-01 selected, got %+v (err=%v)", groups, err)
+	}
+
+	delay, err := c.TestDelay(ctx, "HK-01", "", 2000)
+	if err != nil || delay != 37 {
+		t.Fatalf("TestDelay: got %d, err=%v", delay, err)
+	}
+}
+
+func TestClientModeAndRules(t *testing.T) {
+	mode := model.ModeRule
+	mux := http.NewServeMux()
+	mux.HandleFunc("/configs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			var b map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			mode = model.ProxyMode(b["mode"])
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"mode": string(mode)})
+	})
+	mux.HandleFunc("/rules", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"rules": []model.RuleEntry{
+				{Type: "domain_suffix", Payload: "google.com", Proxy: "Proxy"},
+			},
+		})
+	})
+
+	c, closeFn := newMockClient(mux)
+	defer closeFn()
+
+	ctx := context.Background()
+	if err := c.SetMode(ctx, model.ModeGlobal); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+	got, err := c.GetMode(ctx)
+	if err != nil || got != model.ModeGlobal {
+		t.Fatalf("GetMode: got %q, err=%v", got, err)
+	}
+	rules, err := c.GetRules(ctx)
+	if err != nil || len(rules) != 1 || rules[0].Payload != "google.com" {
+		t.Fatalf("GetRules: got %+v, err=%v", rules, err)
+	}
+}
+
+func TestClientUpdateGeo(t *testing.T) {
+	called := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/configs/geo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret123" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	c, closeFn := newMockClient(mux)
+	defer closeFn()
+
+	if err := c.UpdateGeo(context.Background()); err != nil {
+		t.Fatalf("UpdateGeo: %v", err)
+	}
+	if !called {
+		t.Fatal("expected POST /configs/geo to be called")
+	}
+}

@@ -1,0 +1,32 @@
+# Build & packaging outputs
+.mygo/
+build/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.syso
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Test & coverage
+*.test
+*.out
+coverage.*
+
+# Logs & temporary files
+*.log
+*.tmp
+*.bak
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

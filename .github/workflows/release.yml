@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # the tag, the draft release, and the uploads to it
+
+jobs:
+  draft-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      out: ${{ steps.tag.outputs.out }}
+      has_updates: ${{ steps.tag.outputs.has_updates }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Find the tag
+        id: tag
+        run: |
+          tag="v$(jq -r '.version' mygo.json)"
+          if [ -z "$tag" ] || [ "$tag" = "vnull" ]; then
+            echo "::error::Missing version in mygo.json"
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if [ "$GITHUB_REF_NAME" != "$tag" ]; then
+              echo "::error::$GITHUB_REF_NAME doesn't match the version of mygo.json, $tag"
+              exit 1
+            fi
+          elif [ -z "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+            git tag "$tag"
+            git push origin "refs/tags/$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "out=$(jq -r '.out // "dist"' mygo.json)" >> "$GITHUB_OUTPUT"
+          if jq -e '.updates.github or .updates.s3' mygo.json > /dev/null 2>&1; then
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            if [ -f CHANGELOG.md ]; then
+              awk -v v="${TAG#v}" '
+                /^## / { if (found) exit; found = index($0, "[" v "]") > 0; next }
+                found
+              ' CHANGELOG.md > notes.md
+            fi
+            if [ -s notes.md ]; then
+              notes=(--notes-file notes.md)
+            else
+              notes=(--generate-notes)
+            fi
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --title "$TAG" "${notes[@]}"
+          fi
+
+  build:
+    needs: draft-release
+    name: ${{ matrix.name }}
+    defaults:
+      run:
+        shell: bash
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows, os: windows-latest, platform: "windows/amd64,windows/arm64" }
+          - { name: Linux, os: ubuntu-latest, platform: "linux/amd64,linux/arm64" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.draft-release.outputs.tag }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Find Go's caches
+        id: go-env
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.build }}
+            ${{ steps.go-env.outputs.mod }}
+          key: go-${{ matrix.name }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: go-${{ matrix.name }}-
+      - name: Build and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+          TAG: ${{ needs.draft-release.outputs.tag }}
+          OUT_DIR: ${{ needs.draft-release.outputs.out }}
+          HAS_UPDATES: ${{ needs.draft-release.outputs.has_updates }}
+        run: |
+          if [ -n "$MYGO_UPDATER_PRIVATE_KEY" ] && [ "$HAS_UPDATES" = "true" ]; then
+            go tool mygo build -platform "${{ matrix.platform }}" -upload
+            exit 0
+          fi
+
+          go tool mygo build -platform "${{ matrix.platform }}"
+
+          assets=()
+          while IFS= read -r f; do
+            assets+=("$f")
+          done < <(find "$OUT_DIR" -type f \( \
+            -name '*-setup-*.exe' -o \
+            -name '*.tar.gz' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' \
+          \) | sort)
+
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No release artifacts found in $OUT_DIR"
+            exit 1
+          fi
+
+          gh release upload "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
