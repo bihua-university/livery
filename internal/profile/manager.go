@@ -59,7 +59,7 @@ func NewManager(dataDir string) (*Manager, error) {
 	return m, nil
 }
 
-// DataDir returns the root directory for MySing data.
+// DataDir returns the root directory for Livery data.
 func (m *Manager) DataDir() string { return m.dataDir }
 
 // BinDir returns the directory where downloaded core binaries live.

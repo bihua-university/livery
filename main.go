@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
+	"github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/ui"
 
 	"github.com/bihua-university/livery/internal/app"
@@ -56,6 +59,35 @@ func main() {
 	s0 := pm.Settings()
 	cm.SetGeoDataDir(s0.GeoDataDir)
 	cm.SetCoreType(s0.CoreType, s0.ActiveCorePath())
+
+	if s0.Language == model.LangEN {
+		mygo.App.SetLocale("en")
+	} else {
+		mygo.App.SetLocale("zh-Hans")
+	}
+
+	mygo.Use(native.Plugin)
+	controller.SetAppUpdateHooks(app.AppUpdateHooks{
+		State: func() app.AppUpdateState {
+			return app.AppUpdateState{
+				Supported:          mygo.Updater.Enabled(),
+				AutomaticChecks:    updater.AutomaticChecks(),
+				AutomaticDownloads: updater.AutomaticDownloads(),
+				AvailableVersion:   updater.AvailableVersion(),
+				LastCheck:          updater.LastCheck(),
+			}
+		},
+		CheckForUpdates:       updater.CheckForUpdates,
+		SetAutomaticChecks:    updater.SetAutomaticChecks,
+		SetAutomaticDownloads: updater.SetAutomaticDownloads,
+		SetPrereleases:        mygo.Updater.SetPrereleases,
+	})
+	updater.OnChange(func() {
+		controller.RefreshAppUpdateState()
+	})
+	updater.OnInstalled(func() {
+		controller.LogApp("info", "Application update installed; ready to relaunch")
+	})
 
 	switch controller.Settings().ThemeMode {
 	case model.ThemeLight:
@@ -169,11 +201,38 @@ func main() {
 			})
 		}
 
-		mygo.App.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
-			{Role: mygo.RoleAppMenu},
-			{Role: mygo.RoleEditMenu},
-			{Role: mygo.RoleWindowMenu},
-		}))
+		setAppMenu := func() {
+			var items []*mygo.MenuItem
+			if runtime.GOOS == "darwin" {
+				items = append(items, &mygo.MenuItem{
+					Label: "Livery",
+					Submenu: []*mygo.MenuItem{
+						{Role: mygo.RoleAbout},
+						updater.MenuItem(),
+						mygo.Separator(),
+						{Role: mygo.RoleServices},
+						mygo.Separator(),
+						{Role: mygo.RoleHide},
+						{Role: mygo.RoleHideOthers},
+						{Role: mygo.RoleUnhide},
+						mygo.Separator(),
+						{Role: mygo.RoleQuit},
+					},
+				})
+			} else {
+				items = append(items, &mygo.MenuItem{Role: mygo.RoleAppMenu})
+			}
+			items = append(items,
+				&mygo.MenuItem{Role: mygo.RoleEditMenu},
+				&mygo.MenuItem{Role: mygo.RoleWindowMenu},
+			)
+			mygo.App.SetMenu(mygo.NewMenu(items))
+		}
+		setAppMenu()
+		mygo.App.OnLocaleChanged(func(string) {
+			setAppMenu()
+			controller.RefreshTray()
+		})
 
 		_ = mygo.GlobalShortcut.Register("CmdOrCtrl+Shift+M", func() {
 			if mainWin != nil && mainWin.IsVisible() {
@@ -299,6 +358,15 @@ func buildTrayMenu(controller *app.App, showWindow func()) *mygo.Menu {
 			Label:    label("重启核心", "Restart Core"),
 			Disabled: controller.IsCoreBusy(),
 			Click:    func(*mygo.MenuItem, *mygo.Window) { go controller.RestartCore() },
+		},
+		{
+			Label: func() string {
+				if v := strings.TrimPrefix(strings.TrimSpace(controller.AppUpdate.AvailableVersion), "v"); v != "" {
+					return label("发现新版本 (v"+v+")", "Update Available (v"+v+")")
+				}
+				return label("检查更新...", "Check for Updates...")
+			}(),
+			Click: func(*mygo.MenuItem, *mygo.Window) { controller.CheckAppUpdates() },
 		},
 		{
 			Label: label("退出", "Quit"),

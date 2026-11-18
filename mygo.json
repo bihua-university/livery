@@ -4,5 +4,9 @@
   "identifier": "io.github.bihua-university.livery",
   "version": "0.1.0",
   "license": "MIT",
-  "out": "build"
+  "out": "build",
+  "updates": {
+    "publicKey": "I2SamTaYlEE+QviiC7W4eUnMkwPq2+WweG7UVKReBp8=",
+    "github": "bihua-university/livery"
+  }
 }

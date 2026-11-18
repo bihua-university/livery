@@ -42,8 +42,8 @@ func TestNavigationAndAllPagesRender(t *testing.T) {
 	_, view := newTestApp(t)
 	tt := ui.NewTester(view, 1120, 740)
 
-	if !tt.HasText("MySing") {
-		t.Fatalf("expected MySing brand in sidebar, texts: %v", tt.Texts())
+	if !tt.HasText("Livery") {
+		t.Fatalf("expected Livery brand in sidebar, texts: %v", tt.Texts())
 	}
 	if !tt.HasText("实时流量趋势 (60s)") {
 		t.Fatalf("expected overview chart heading")
@@ -57,7 +57,7 @@ func TestNavigationAndAllPagesRender(t *testing.T) {
 		{"配置", "Default Profile"},
 		{"连接", "活跃连接"},
 		{"规则", "生效路由规则"},
-		{"日志", "MySing initialized"},
+		{"日志", "Livery initialized"},
 		{"设置", "外观与桌面行为"},
 	}
 

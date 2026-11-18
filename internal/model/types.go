@@ -162,6 +162,9 @@ type AppSettings struct {
 
 	// Custom user routing rules
 	CustomRules []CustomRule `json:"custom_rules"`
+
+	// App OTA updates
+	UpdatePrereleases bool `json:"update_prereleases"`
 }
 
 // CorePathFor returns the configured custom binary path for the specified core type.

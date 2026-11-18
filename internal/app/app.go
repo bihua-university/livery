@@ -156,6 +156,10 @@ type App struct {
 	GeoStatus   string
 	GeoFiles    []model.GeoFileStatus
 
+	// App OTA update state (wired in main.go when updater plugin is active)
+	AppUpdate   AppUpdateState
+	updateHooks AppUpdateHooks
+
 	// Settings draft buffers
 	SettingsScroll ui.ScrollState
 	ProfilesScroll ui.ScrollState
@@ -1792,3 +1796,81 @@ func (a *App) DeleteCustomRuleAt(idx int) {
 		go a.RestartCore()
 	}
 }
+
+// AppUpdateState summarizes OTA update availability and preferences for UI/tray rendering.
+type AppUpdateState struct {
+	Supported          bool
+	AutomaticChecks    bool
+	AutomaticDownloads bool
+	AvailableVersion   string
+	LastCheck          time.Time
+}
+
+// AppUpdateHooks connects App to the MyGo updater plugin without coupling unit tests to plugin registration.
+type AppUpdateHooks struct {
+	State                 func() AppUpdateState
+	CheckForUpdates       func()
+	SetAutomaticChecks    func(bool)
+	SetAutomaticDownloads func(bool)
+	SetPrereleases        func(bool)
+}
+
+// SetAppUpdateHooks registers OTA callbacks and initializes current update state.
+func (a *App) SetAppUpdateHooks(h AppUpdateHooks) {
+	a.updateHooks = h
+	if h.SetPrereleases != nil {
+		h.SetPrereleases(a.SettingsData.UpdatePrereleases)
+	}
+	if h.State != nil {
+		a.AppUpdate = h.State()
+	}
+}
+
+// RefreshAppUpdateState reloads OTA update state from the updater plugin and refreshes UI/tray.
+func (a *App) RefreshAppUpdateState() {
+	if a.updateHooks.State == nil {
+		return
+	}
+	st := a.updateHooks.State()
+	a.UpdateUI(func() {
+		a.AppUpdate = st
+		a.RefreshTray()
+	})
+}
+
+// CheckAppUpdates opens the native OTA update window and checks for new releases.
+func (a *App) CheckAppUpdates() {
+	if a.updateHooks.CheckForUpdates == nil {
+		a.Notify(a.Tr("当前运行环境未启用应用更新器", "App updater is not active"))
+		return
+	}
+	a.updateHooks.CheckForUpdates()
+}
+
+// SetUpdateAutomaticChecks toggles periodic background OTA update checks.
+func (a *App) SetUpdateAutomaticChecks(on bool) {
+	a.AppUpdate.AutomaticChecks = on
+	if a.updateHooks.SetAutomaticChecks != nil {
+		a.updateHooks.SetAutomaticChecks(on)
+	}
+	a.RefreshAppUpdateState()
+}
+
+// SetUpdateAutomaticDownloads toggles automatic background download and install of updates.
+func (a *App) SetUpdateAutomaticDownloads(on bool) {
+	a.AppUpdate.AutomaticDownloads = on
+	if a.updateHooks.SetAutomaticDownloads != nil {
+		a.updateHooks.SetAutomaticDownloads(on)
+	}
+	a.RefreshAppUpdateState()
+}
+
+// SetUpdatePrereleases toggles receiving pre-release builds for OTA updates.
+func (a *App) SetUpdatePrereleases(on bool) {
+	a.SettingsData.UpdatePrereleases = on
+	_ = a.PM.SaveSettings(a.SettingsData)
+	if a.updateHooks.SetPrereleases != nil {
+		a.updateHooks.SetPrereleases(on)
+	}
+}
+

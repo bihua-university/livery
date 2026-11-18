@@ -362,8 +362,10 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 					if components.Segmented(c.Key("set-lang-seg"), p, s, &langIdx, []string{"简体中文", "English"}).Changed() {
 						if langIdx == 1 {
 							a.SettingsData.Language = model.LangEN
+							mygo.App.SetLocale("en")
 						} else {
 							a.SettingsData.Language = model.LangZH
+							mygo.App.SetLocale("zh-Hans")
 						}
 						_ = a.PM.SaveSettings(a.SettingsData)
 						a.RefreshTray()
@@ -399,7 +401,53 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				})
 			})
 
-			// 4. Data & Diagnostics
+			// 5. Software Updates (OTA)
+			components.Card(c, p, func() {
+				appVer := strings.TrimSpace(mygo.App.Version())
+				verChip := "dev"
+				if appVer != "" {
+					verChip = "v" + strings.TrimPrefix(appVer, "v")
+				}
+				availVer := strings.TrimPrefix(strings.TrimSpace(a.AppUpdate.AvailableVersion), "v")
+
+				components.SectionHeader(c, p, s, a.Tr("应用更新", "Software Updates"), func() {
+					if availVer != "" {
+						components.StatusChip(c, s, fmt.Sprintf(a.Tr("发现新版本 v%s", "Update v%s"), availVer), p.ProgressSurface, p.ProgressSurfaceForeground, p.IconBlue)
+					} else if a.AppUpdate.Supported {
+						components.StatusChip(c, s, verChip, p.SuccessSurface, p.SuccessSurfaceForeground, p.Success)
+					} else {
+						components.StatusChip(c, s, verChip, p.Tag, p.ForegroundSubtle, p.ForegroundSubtlest)
+					}
+					btnLabel := a.Tr("检查更新", "Check for Updates")
+					if availVer != "" {
+						btnLabel = a.Tr("立即更新", "Update Now")
+					}
+					if components.PrimaryActionButton(c, p, s, icons.Refresh, btnLabel).Clicked() {
+						a.CheckAppUpdates()
+					}
+				})
+
+				if !a.AppUpdate.LastCheck.IsZero() {
+					components.KeyValueRow(c, p, s, a.Tr("上次检查时间", "Last Checked"), components.FormatRelativeTime(a.AppUpdate.LastCheck, a.SettingsData.Language), false)
+				}
+				if !a.AppUpdate.Supported {
+					ui.Text(c, a.Tr("当前为开发构建或只读安装目录，不支持原地自动更新；点击“检查更新”可查看说明。", "Development builds or read-only installs do not support in-place OTA updates.")).FontSize(s.XS).TextColor(p.ForegroundSubtle)
+				}
+
+				ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
+					if ui.Checkbox(c.Key("set-ota-auto-check"), &a.AppUpdate.AutomaticChecks, a.Tr("自动检查更新 (24h)", "Check automatically (24h)")).Changed() {
+						a.SetUpdateAutomaticChecks(a.AppUpdate.AutomaticChecks)
+					}
+					if ui.Checkbox(c.Key("set-ota-auto-dl"), &a.AppUpdate.AutomaticDownloads, a.Tr("自动下载并安装更新", "Download & install automatically")).Changed() {
+						a.SetUpdateAutomaticDownloads(a.AppUpdate.AutomaticDownloads)
+					}
+					if ui.Checkbox(c.Key("set-ota-beta"), &a.SettingsData.UpdatePrereleases, a.Tr("接收预发布版 (Beta)", "Include pre-releases (Beta)")).Changed() {
+						a.SetUpdatePrereleases(a.SettingsData.UpdatePrereleases)
+					}
+				})
+			})
+
+			// 6. Data & Diagnostics
 			components.Card(c, p, func() {
 				ui.Text(c, a.Tr("数据目录与诊断", "Data & Diagnostics")).FontSize(s.Base).FontWeight(600).TextColor(p.Foreground)
 				components.KeyValueRow(c, p, s, a.Tr("配置数据目录", "Data Directory"), a.PM.DataDir(), true)
