@@ -8,9 +8,13 @@ Guidance for coding agents working in **Livery** (`github.com/bihua-university/l
   ```sh
   go tool mygo vet .
   ```
-- **Run unit tests:**
+- **Run all tests (unit + real E2E via `mygo/plugins/automation`):**
   ```sh
-  CGO_ENABLED=0 go test ./internal/...
+  CGO_ENABLED=0 go test ./...
+  ```
+- **Run unit tests only (skip E2E):**
+  ```sh
+  CGO_ENABLED=0 go test -short ./...
   ```
 - **Run locally:**
   ```sh
@@ -21,6 +25,8 @@ Guidance for coding agents working in **Livery** (`github.com/bihua-university/l
   go tool mygo build -platform windows/amd64 -skip-installer
   ```
   Omit `-skip-installer` to also generate platform installers/archives.
+
+Note: `automation_e2e.go` (`//go:build e2e`) enables `github.com/egoist/mygo/plugins/automation` exclusively for `-tags e2e` test builds and is excluded from normal/release builds. E2E launches accept `LIVERY_DATA_DIR` and `MYGO_AUTOMATION` for isolated UI testing.
 
 ## Architecture & Directory Layout
 
@@ -42,9 +48,9 @@ Guidance for coding agents working in **Livery** (`github.com/bihua-university/l
 
 ## MyGo UI & Concurrency Conventions
 
-Detailed rules live in `.agents/skills/mygo-maintenance/SKILL.md` (read it before major UI edits or `mygo` upgrades):
+Detailed rules live in `.agents/skills/mygo-maintenance/SKILL.md` (read it before major UI edits or `mygo` upgrades), and interactive E2E driving instructions live in `.agents/skills/mygo-automation/SKILL.md`:
 
 - **Context & Element lifetimes:** Never store `*ui.Context` or `ui.Element` across build passes or capture them in goroutines. Store `ui.Handle` (`.Bind(&handle)`) and persistent model data; use `c.Services()` or `win.Update(...)` for async callbacks.
 - **Stable keys:** Assign unique `c.Key(...)` before constructing stateful/animated widgets and list items so collapse/expand animations and list scroll states remain stable across rebuilds.
 - **Threading & I/O:** Keep network calls, subprocess start/stop/restart, and disk I/O off the UI thread; guard against concurrent restarts/port conflicts in `core.Manager` and `app.App`, and publish results asynchronously via `Window.Update`.
-- **Verification before finishing:** Always run `go tool mygo vet .` and `CGO_ENABLED=0 go test ./internal/...` after code changes.
+- **Verification before finishing:** Always run `go tool mygo vet .` and `CGO_ENABLED=0 go test ./...` (or `-short` in headless environments) after code changes.

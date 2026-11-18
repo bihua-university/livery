@@ -25,16 +25,21 @@ import (
 func main() {
 	debug.SetGCPercent(25)
 
-	if !mygo.App.RequestSingleInstanceLock() {
+	automationMode := strings.TrimSpace(os.Getenv("MYGO_AUTOMATION")) != ""
+	if !automationMode && !mygo.App.RequestSingleInstanceLock() {
 		return
 	}
 
 	mygo.App.SetName("Livery")
 
-	userDataDir, err := mygo.App.Path(mygo.PathUserData)
-	if err != nil {
-		home, _ := os.UserHomeDir()
-		userDataDir = filepath.Join(home, ".livery")
+	userDataDir := strings.TrimSpace(os.Getenv("LIVERY_DATA_DIR"))
+	if userDataDir == "" {
+		var err error
+		userDataDir, err = mygo.App.Path(mygo.PathUserData)
+		if err != nil {
+			home, _ := os.UserHomeDir()
+			userDataDir = filepath.Join(home, ".livery")
+		}
 	}
 
 	pm, err := profile.NewManager(userDataDir)
@@ -145,6 +150,9 @@ func main() {
 	})
 	mygo.App.OnWindowAllClosed(func() {
 		// Keep running in system tray when main window is hidden/closed.
+		if automationMode {
+			mygo.App.Quit()
+		}
 	})
 	mygo.App.OnBeforeQuit(func(_ *mygo.QuitEvent) {
 		quitting = true
@@ -182,23 +190,25 @@ func main() {
 			})
 		}
 
-		tray, trayErr := setupTray(controller, showWindow)
-		if trayErr != nil {
-			log.Printf("tray setup: %v", trayErr)
-		} else {
-			controller.SetTrayRefresh(func() {
-				refreshTrayMenu(tray, controller, showWindow)
-			})
-			tray.OnAppearanceChange(func() {
-				refreshTrayMenu(tray, controller, showWindow)
-			})
-			tray.OnClick(func() {
-				if mainWin != nil && mainWin.IsVisible() {
-					mainWin.Focus()
-				} else {
-					showWindow()
-				}
-			})
+		if !automationMode {
+			tray, trayErr := setupTray(controller, showWindow)
+			if trayErr != nil {
+				log.Printf("tray setup: %v", trayErr)
+			} else {
+				controller.SetTrayRefresh(func() {
+					refreshTrayMenu(tray, controller, showWindow)
+				})
+				tray.OnAppearanceChange(func() {
+					refreshTrayMenu(tray, controller, showWindow)
+				})
+				tray.OnClick(func() {
+					if mainWin != nil && mainWin.IsVisible() {
+						mainWin.Focus()
+					} else {
+						showWindow()
+					}
+				})
+			}
 		}
 
 		setAppMenu := func() {
@@ -234,13 +244,15 @@ func main() {
 			controller.RefreshTray()
 		})
 
-		_ = mygo.GlobalShortcut.Register("CmdOrCtrl+Shift+M", func() {
-			if mainWin != nil && mainWin.IsVisible() {
-				mainWin.Hide()
-			} else {
-				showWindow()
-			}
-		})
+		if !automationMode {
+			_ = mygo.GlobalShortcut.Register("CmdOrCtrl+Shift+M", func() {
+				if mainWin != nil && mainWin.IsVisible() {
+					mainWin.Hide()
+				} else {
+					showWindow()
+				}
+			})
+		}
 
 		controller.StartBackground(bgCtx)
 	})
