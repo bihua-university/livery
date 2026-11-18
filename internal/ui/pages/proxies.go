@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/egoist/mygo/ui"
 
@@ -193,56 +192,38 @@ func proxyGroupAccordionCard(c *ui.Context, a *app.App, p theme.Palette, s theme
 	progress := card.Animate("expand", target, 220*time.Millisecond)
 
 	card.Children(func() {
-		// Card header row
-		ui.Row(c).Padding(8, 12, 8, 8).Gap(8).AlignItems(ui.Center).Children(func() {
-			toggleBtn := ui.ButtonBase(c.Key("grp-toggle-"+gName)).
-				Row().
-				Grow(1).
-				MinWidth(0).
-				Padding(4, 6).
-				Gap(10).
-				Radius(theme.RadiusLG).
-				AlignItems(ui.Center).
-				Label(gName).
-				Cursor(ui.CursorPointer)
-			if toggleBtn.Hovered() {
-				toggleBtn.Background(p.SurfaceHover)
-			}
-			toggleBtn.OnClick(func() {
-				a.SelectedGroup = gName
-				a.ToggleGroupExpanded(gName)
-			})
-			toggleBtn.Children(func() {
-				ui.Box(c).
-					Size(32, 32).
-					Radius(theme.RadiusLG).
-					Background(p.Surface).
-					Border(1, p.Border).
-					Center().
-					Children(func() {
-						ui.Text(c, groupInitial(gName)).
-							FontSize(s.Base).
-							FontWeight(600).
-							TextColor(p.ForegroundSubtle).
-							SingleLine()
-					})
+		// Card header row: entire strip highlights on hover and toggles expand/collapse.
+		header := ui.ButtonBase(c.Key("grp-toggle-"+gName)).
+			Row().
+			FillWidth().
+			Padding(10, 12).
+			Gap(10).
+			AlignItems(ui.Center).
+			Label(gName).
+			Cursor(ui.CursorPointer)
+		if header.Hovered() {
+			header.Background(p.SurfaceHover)
+		}
+		header.OnClick(func() {
+			a.SelectedGroup = gName
+			a.ToggleGroupExpanded(gName)
+		})
+		header.Children(func() {
+			ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
+				ui.Text(c, gName).
+					FontSize(s.Base).
+					FontWeight(600).
+					TextColor(p.Foreground).
+					SingleLine()
 
-				ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-					ui.Text(c, gName).
-						FontSize(s.Base).
-						FontWeight(600).
-						TextColor(p.Foreground).
-						SingleLine()
-
-					sub := g.Type
-					if g.Now != "" {
-						sub = g.Now
-					}
-					ui.Text(c, sub).
-						FontSize(s.XS).
-						TextColor(p.ForegroundSubtle).
-						SingleLine()
-				})
+				sub := g.Type
+				if g.Now != "" {
+					sub = g.Now
+				}
+				ui.Text(c, sub).
+					FontSize(s.XS).
+					TextColor(p.ForegroundSubtle).
+					SingleLine()
 			})
 
 			if expanded {
@@ -255,7 +236,7 @@ func proxyGroupAccordionCard(c *ui.Context, a *app.App, p theme.Palette, s theme
 					Tooltip(a.Tr("组测速", "Test Group")).
 					Cursor(ui.CursorPointer)
 				if testBtn.Hovered() {
-					testBtn.Background(p.SurfaceHover)
+					testBtn.Background(p.Hover)
 				}
 				testBtn.OnClick(func() { a.TestGroupDelay(gName) })
 				testBtn.Children(func() {
@@ -270,26 +251,17 @@ func proxyGroupAccordionCard(c *ui.Context, a *app.App, p theme.Palette, s theme
 					SingleLine()
 			}
 
-			chevBtn := ui.ButtonBase(c.Key("grp-chev-"+gName)).
+			ui.Box(c).
 				Size(26, 26).
 				Center().
 				Radius(theme.RadiusFull).
 				Background(p.Surface).
-				Cursor(ui.CursorPointer).
-				Label(a.Tr("展开/收起 ", "Toggle ") + gName)
-			if chevBtn.Hovered() {
-				chevBtn.Background(p.SurfaceHover)
-			}
-			chevBtn.OnClick(func() {
-				a.SelectedGroup = gName
-				a.ToggleGroupExpanded(gName)
-			})
-			chevBtn.Children(func() {
-				ui.Icon(c, icons.ChevronDown).
-					FontSize(14).
-					TextColor(p.ForegroundSubtle).
-					Rotate(180 * progress)
-			})
+				Children(func() {
+					ui.Icon(c, icons.ChevronDown).
+						FontSize(14).
+						TextColor(p.ForegroundSubtle).
+						Rotate(180 * progress)
+				})
 		})
 
 		if !expanded && progress == 0 {
@@ -331,15 +303,6 @@ func proxyGroupAccordionCard(c *ui.Context, a *app.App, p theme.Palette, s theme
 			}
 		})
 	})
-}
-
-func groupInitial(name string) string {
-	for _, r := range strings.TrimSpace(name) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return strings.ToUpper(string(r))
-		}
-	}
-	return "P"
 }
 
 func filteredSortedNodes(a *app.App, g model.ProxyGroup, q string, includeAllOnGroupMatch bool) []string {

@@ -90,10 +90,8 @@ func Rules(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 			ui.List(c.Key("rules-list"), &a.RuleListState, len(filtered), func(i int) {
 				r := filtered[i]
 				ui.Row(c).Padding(7, 14).Gap(10).AlignItems(ui.Center).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
-					ui.Box(c).Width(130).Children(func() {
-						components.TagChip(c, p, s, r.Type)
-					})
-					ui.Text(c, r.Payload).FontSize(s.SM).Font(theme.MonoFont()).TextColor(p.Foreground).Grow(1).SingleLine()
+					components.TagChip(c, p, s, r.Type).Shrink(0)
+					ui.Text(c, r.Payload).FontSize(s.SM).Font(theme.MonoFont()).TextColor(p.Foreground).Grow(1).MinWidth(0).SingleLine()
 					outColor := p.IconBlue
 					if strings.EqualFold(r.Proxy, "direct") {
 						outColor = p.Success

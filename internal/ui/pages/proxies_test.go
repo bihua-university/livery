@@ -99,3 +99,78 @@ func TestProxyGroupAccordionAnimation(t *testing.T) {
 		t.Fatal("expected NodeD to be removed once collapse animation finishes")
 	}
 }
+
+func TestProxyGroupHeaderFullHoverAndNoInitialBox(t *testing.T) {
+	dir := t.TempDir()
+	pm, err := profile.NewManager(dir)
+	if err != nil {
+		t.Fatalf("profile.NewManager: %v", err)
+	}
+	cm := core.NewManager(dir, dir, nil, nil)
+	a := app.New(pm, cm)
+	t.Cleanup(a.Shutdown)
+	a.CoreInfo.Status = model.CoreRunning
+	a.ExpandedGroups = map[string]bool{
+		"Primary":   true,
+		"Secondary": false,
+	}
+	a.Groups = []model.ProxyGroup{
+		{Name: "Primary", Type: "Selector", Now: "NodeA", All: []string{"NodeA"}},
+		{Name: "Secondary", Type: "Selector", Now: "NodeB", All: []string{"NodeB"}},
+	}
+	a.Nodes = map[string]model.ProxyNode{
+		"NodeA": {Name: "NodeA", Type: "Direct", Delay: 10},
+		"NodeB": {Name: "NodeB", Type: "Direct", Delay: 20},
+	}
+
+	tester := ui.NewTester(func(c *ui.Context) {
+		Proxies(c, a, theme.Light(), theme.Scale(14))
+	}, 960, 700)
+
+	// Generated single-letter initial boxes ("P", "S") should not be rendered.
+	for _, txt := range tester.Texts() {
+		if txt == "P" || txt == "S" {
+			t.Fatalf("unexpected generated initial square badge %q in texts: %v", txt, tester.Texts())
+		}
+	}
+
+	// Clicking the nested speed test button inside an expanded header must not collapse the group.
+	if err := tester.Click("组测速 Primary"); err != nil {
+		t.Fatalf("Click(组测速 Primary): %v", err)
+	}
+	if !a.IsGroupExpanded("Primary") {
+		t.Fatal("expected Primary to remain expanded when clicking speed test button")
+	}
+
+	// Verify hovering over the right side ("Selector" label) highlights the entire header,
+	// including both the left and right ends of the Secondary header row.
+	secHeader, ok := tester.Find("Secondary")
+	if !ok {
+		t.Fatal("expected Secondary header element")
+	}
+	selBadge, ok := tester.Find("Selector")
+	if !ok {
+		t.Fatal("expected Selector text inside Secondary header")
+	}
+	sampleY := int(secHeader.Y + 4)
+	leftX := int(secHeader.X + 4)
+	rightX := int(secHeader.X + secHeader.W - 4)
+
+	tester.Move(0, 0)
+	baseImg := tester.Image()
+	baseLeft := baseImg.RGBAAt(leftX, sampleY)
+	baseRight := baseImg.RGBAAt(rightX, sampleY)
+
+	tester.Move(selBadge.X+selBadge.W/2, selBadge.Y+selBadge.H/2)
+	hoverImg := tester.Image()
+	hoverLeft := hoverImg.RGBAAt(leftX, sampleY)
+	hoverRight := hoverImg.RGBAAt(rightX, sampleY)
+
+	if hoverLeft == baseLeft {
+		t.Fatalf("expected left side of header to highlight when hovering right side (remained %v)", hoverLeft)
+	}
+	if hoverRight == baseRight {
+		t.Fatalf("expected right side of header to highlight when hovering right side (remained %v)", hoverRight)
+	}
+}
+
