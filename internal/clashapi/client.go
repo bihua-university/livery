@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,7 +18,10 @@ import (
 	"github.com/bihua-university/livery/internal/model"
 )
 
-// Client speaks to sing-box's experimental.clash_api HTTP endpoints.
+// ErrUnsupported indicates that the connected core's Clash API does not implement the requested endpoint.
+var ErrUnsupported = errors.New("clash api endpoint unsupported")
+
+// Client speaks to sing-box/mihomo Clash API HTTP endpoints.
 type Client struct {
 	baseURL string
 	secret  string
@@ -412,3 +416,41 @@ func (c *Client) StreamLogs(ctx context.Context, level string, onLog func(model.
 	}
 	return scanner.Err()
 }
+
+// StreamMemory reads the newline-delimited JSON stream from /memory until ctx is canceled.
+// Mihomo reports core memory via /memory ({"inuse":..., "oslimit":...}) rather than /connections.
+func (c *Client) StreamMemory(ctx context.Context, onMemory func(int64)) error {
+	resp, err := c.doStream(ctx, "/memory")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		return ErrUnsupported
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("memory stream HTTP %d", resp.StatusCode)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var payload struct {
+			Inuse     int64 `json:"inuse"`
+			Footprint int64 `json:"footprint"`
+		}
+		if json.Unmarshal(line, &payload) == nil {
+			mem := payload.Inuse
+			if mem <= 0 {
+				mem = payload.Footprint
+			}
+			if mem > 0 {
+				onMemory(mem)
+			}
+		}
+	}
+	return scanner.Err()
+}
+

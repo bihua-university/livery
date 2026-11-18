@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -193,6 +194,7 @@ type App struct {
 	hiddenPeakUp      int64
 	hiddenPeakDown    int64
 	hasHiddenTraffic  bool
+	streamedCoreMem   atomic.Int64
 }
 
 // New constructs the application controller.
@@ -431,6 +433,7 @@ func (a *App) OnCoreState(info model.CoreInfo) {
 			a.PeakUp = 0
 			a.PeakDown = 0
 			a.MemoryBytes = 0
+			a.streamedCoreMem.Store(0)
 			if info.Status != model.CoreStarting {
 				a.Groups = nil
 				a.Nodes = nil
@@ -838,6 +841,35 @@ func (a *App) startStreams() {
 		}
 	}()
 
+	// Live core memory stream (/memory for Mihomo; sing-box reports memory in /connections).
+	go func() {
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			err := client.StreamMemory(ctx, func(mem int64) {
+				a.streamedCoreMem.Store(mem)
+				if a.WindowHidden.Load() {
+					return
+				}
+				a.UpdateUI(func() {
+					if a.WindowHidden.Load() || a.CoreInfo.Status != model.CoreRunning {
+						return
+					}
+					a.MemoryBytes = mem
+				})
+			})
+			if errors.Is(err, clashapi.ErrUnsupported) {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(1500 * time.Millisecond):
+			}
+		}
+	}()
+
 	// Periodic snapshot sync (/proxies, /connections, /rules)
 	go func() {
 		select {
@@ -870,7 +902,11 @@ func (a *App) startStreams() {
 						}
 						a.TotalUp = snap.UploadTotal
 						a.TotalDown = snap.DownloadTotal
-						a.MemoryBytes = snap.Memory
+						mem := snap.Memory
+						if mem <= 0 {
+							mem = a.streamedCoreMem.Load()
+						}
+						a.MemoryBytes = mem
 						a.AppMemoryBytes = appMem
 						if !a.ConnPaused {
 							a.reconcileConnections(snap.Connections)

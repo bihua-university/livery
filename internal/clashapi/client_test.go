@@ -3,6 +3,8 @@ package clashapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -157,3 +159,39 @@ func TestClientUpdateGeo(t *testing.T) {
 		t.Fatal("expected POST /configs/geo to be called")
 	}
 }
+
+func TestClientStreamMemory(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/memory", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret123" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintln(w, `{"inuse":0,"oslimit":0}`)
+		_, _ = fmt.Fprintln(w, `{"inuse":53420032,"oslimit":0}`)
+		_, _ = fmt.Fprintln(w, `{"inuse":0,"oslimit":0,"footprint":12345678}`)
+	})
+
+	c, closeFn := newMockClient(mux)
+	defer closeFn()
+
+	var got []int64
+	if err := c.StreamMemory(context.Background(), func(mem int64) {
+		got = append(got, mem)
+	}); err != nil {
+		t.Fatalf("StreamMemory: %v", err)
+	}
+	if len(got) != 2 || got[0] != 53420032 || got[1] != 12345678 {
+		t.Fatalf("unexpected memory samples: %v", got)
+	}
+
+	mux404 := http.NewServeMux()
+	mux404.HandleFunc("/memory", http.NotFound)
+	c404, close404 := newMockClient(mux404)
+	defer close404()
+	if err := c404.StreamMemory(context.Background(), func(int64) {}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("expected ErrUnsupported on 404, got %v", err)
+	}
+}
+
