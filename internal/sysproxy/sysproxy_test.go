@@ -68,3 +68,26 @@ func TestStatusMatchesTarget(t *testing.T) {
 		t.Fatal("expected active AutoConfigURL to prevent MatchesTarget")
 	}
 }
+
+func TestDefaultBypassIncludesTailscaleAndLegacyUpgrade(t *testing.T) {
+	items := ParseBypassList(DefaultBypass())
+	hasTS := false
+	hasCGNAT := false
+	for _, it := range items {
+		if it == "*.ts.net" {
+			hasTS = true
+		}
+		if it == "100.64.*" || it == "100.64.0.0/10" {
+			hasCGNAT = true
+		}
+	}
+	if !hasTS || !hasCGNAT {
+		t.Fatalf("expected DefaultBypass to include *.ts.net and Tailscale CGNAT, got: %q", DefaultBypass())
+	}
+	if !IsLegacyDefaultBypass(legacyDefaultBypass) {
+		t.Fatal("expected IsLegacyDefaultBypass to match legacyDefaultBypass")
+	}
+	if IsLegacyDefaultBypass("localhost, custom.internal") {
+		t.Fatal("expected custom bypass not to be treated as legacy default")
+	}
+}

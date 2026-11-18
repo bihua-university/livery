@@ -146,6 +146,7 @@ func TestConvertSingBoxToMihomo(t *testing.T) {
 	  "route": {
 	    "rules": [
 	      { "domain_suffix": ["google.com"], "outbound": "Proxy" },
+	      { "rule_set": ["geosite-cn", "geoip-cn"], "outbound": "direct" },
 	      { "ip_is_private": true, "outbound": "direct" }
 	    ],
 	    "final": "Proxy"
@@ -155,11 +156,25 @@ func TestConvertSingBoxToMihomo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConvertSingBoxToMihomo: %v", err)
 	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	dnsObj, _ := doc["dns"].(map[string]any)
+	if dnsObj == nil || dnsObj["enable"] != true {
+		t.Fatalf("expected converted mihomo yaml to preserve enabled dns block, got %+v", doc["dns"])
+	}
 	rules := ParseRulesFromConfig(out)
-	if len(rules) < 3 {
-		t.Fatalf("expected >= 3 parsed rules from mihomo yaml, got %d", len(rules))
+	if len(rules) < 5 {
+		t.Fatalf("expected >= 5 parsed rules from mihomo yaml, got %d: %+v", len(rules), rules)
 	}
 	if rules[0].Type != "DOMAIN-SUFFIX" || rules[0].Payload != "google.com" || rules[0].Proxy != "Proxy" {
 		t.Fatalf("unexpected first rule: %+v", rules[0])
+	}
+	if rules[1].Type != "GEOSITE" || rules[1].Payload != "cn" || rules[1].Proxy != "DIRECT" {
+		t.Fatalf("expected GEOSITE,cn,DIRECT rule, got %+v", rules[1])
+	}
+	if rules[2].Type != "GEOIP" || rules[2].Payload != "CN" || rules[2].Proxy != "DIRECT" {
+		t.Fatalf("expected GEOIP,CN,DIRECT rule, got %+v", rules[2])
 	}
 }

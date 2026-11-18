@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -234,19 +235,38 @@ rules:
 	if tunObj == nil || tunObj["enable"] != true {
 		t.Fatalf("expected tun.enable=true, got %+v", tunObj)
 	}
+	excludes := strSlice(tunObj["route-exclude-address"])
+	if !containsStr(excludes, "100.64.0.0/10") || !containsStr(excludes, "fd7a:115c:a1e0::/48") {
+		t.Fatalf("expected Tailscale CIDRs in tun.route-exclude-address, got %v", excludes)
+	}
+
+	dnsObj, _ := parsed["dns"].(map[string]any)
+	if dnsObj == nil || !containsStr(strSlice(dnsObj["fake-ip-filter"]), "+.ts.net") {
+		t.Fatalf("expected +.ts.net in dns.fake-ip-filter, got %+v", dnsObj)
+	}
+	policy, _ := dnsObj["nameserver-policy"].(map[string]any)
+	if policy == nil || policy["+.ts.net"] != "system" {
+		t.Fatalf("expected +.ts.net=system in dns.nameserver-policy, got %+v", policy)
+	}
 
 	rules := ParseRulesFromConfig(compiled)
-	if len(rules) != 4 {
-		t.Fatalf("expected 4 rules, got %d: %+v", len(rules), rules)
+	if len(rules) != 7 {
+		t.Fatalf("expected 7 rules (1 prepended + 3 Tailscale direct + 1 existing + 1 appended + 1 MATCH), got %d: %+v", len(rules), rules)
 	}
 	if rules[0].Payload != "example.com" || rules[0].Proxy != "DIRECT" {
 		t.Fatalf("expected prepended rule first, got %+v", rules[0])
 	}
-	if rules[2].Payload != "8.8.8.8/32" || rules[2].Proxy != "REJECT" {
-		t.Fatalf("expected appended rule before MATCH, got %+v", rules[2])
+	if rules[1].Type != "DOMAIN-SUFFIX" || rules[1].Payload != "ts.net" || rules[1].Proxy != "DIRECT" {
+		t.Fatalf("expected Tailscale domain rule second, got %+v", rules[1])
 	}
-	if rules[3].Type != "MATCH" {
-		t.Fatalf("expected MATCH last, got %+v", rules[3])
+	if rules[2].Type != "IP-CIDR" || rules[2].Payload != "100.64.0.0/10" || rules[2].Proxy != "DIRECT" {
+		t.Fatalf("expected Tailscale IPv4 CIDR rule third, got %+v", rules[2])
+	}
+	if rules[5].Payload != "8.8.8.8/32" || rules[5].Proxy != "REJECT" {
+		t.Fatalf("expected appended rule before MATCH, got %+v", rules[5])
+	}
+	if rules[6].Type != "MATCH" {
+		t.Fatalf("expected MATCH last, got %+v", rules[6])
 	}
 }
 
@@ -318,4 +338,54 @@ func TestCompileMihomoInjectsGeoSettings(t *testing.T) {
 	if geox == nil || geox["geoip"] != settings.GeoIPURL || geox["geosite"] != settings.GeoSiteURL || geox["mmdb"] != settings.MMDBURL || geox["asn"] != settings.ASNURL {
 		t.Fatalf("unexpected geox-url: %+v", geox)
 	}
+}
+
+func TestCompileMihomoNoDuplicateTailscaleRulesAndLegacyBypass(t *testing.T) {
+	settings := model.DefaultSettings()
+	settings.CoreType = model.CoreMihomo
+	settings.TUNEnabled = false
+
+	compiled, err := CompileForCore([]byte(defaultMihomoStarterConfig), model.Profile{}, settings)
+	if err != nil {
+		t.Fatalf("CompileForCore: %v", err)
+	}
+	rules := ParseRulesFromConfig(compiled)
+	tsCount := 0
+	for _, r := range rules {
+		if r.Type == "DOMAIN-SUFFIX" && r.Payload == "ts.net" {
+			tsCount++
+		}
+	}
+	if tsCount != 1 {
+		t.Fatalf("expected exactly 1 ts.net rule without duplication, got %d: %+v", tsCount, rules)
+	}
+
+	dir := t.TempDir()
+	legacyBypass := "localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1"
+	switch runtime.GOOS {
+	case "windows":
+		legacyBypass = "localhost;127.*;192.168.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;*.local;<local>"
+	case "darwin":
+		legacyBypass = "127.0.0.1,localhost,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1,*.local"
+	}
+	legacyJSON := `{"system_proxy_bypass":"` + legacyBypass + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(legacyJSON), 0o644); err != nil {
+		t.Fatalf("write legacy settings: %v", err)
+	}
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if got := mgr.Settings().SystemProxyBypass; !strings.Contains(got, "*.ts.net") {
+		t.Fatalf("expected legacy default bypass to be upgraded with *.ts.net, got %q", got)
+	}
+}
+
+func containsStr(list []string, target string) bool {
+	for _, s := range list {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }

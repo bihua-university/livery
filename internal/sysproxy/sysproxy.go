@@ -36,6 +36,11 @@ func DefaultBypass() string {
 	return defaultBypass
 }
 
+// IsLegacyDefaultBypass reports whether raw matches the pre-Tailscale default bypass list.
+func IsLegacyDefaultBypass(raw string) bool {
+	return EqualBypass(raw, legacyDefaultBypass)
+}
+
 // BypassSeparator returns the platform-native separator used in bypass strings.
 func BypassSeparator() string {
 	return bypassSeparator

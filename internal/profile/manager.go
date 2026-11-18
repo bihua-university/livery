@@ -22,6 +22,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bihua-university/livery/internal/model"
+	"github.com/bihua-university/livery/internal/sysproxy"
 )
 
 // Manager handles persistent storage for AppSettings, Profiles, and compiled runtime config.
@@ -624,6 +625,9 @@ func (m *Manager) loadSettings() error {
 	if s.ASNURL == "" {
 		s.ASNURL = def.ASNURL
 	}
+	if strings.TrimSpace(s.SystemProxyBypass) == "" || sysproxy.IsLegacyDefaultBypass(s.SystemProxyBypass) {
+		s.SystemProxyBypass = def.SystemProxyBypass
+	}
 	m.mu.Lock()
 	m.settings = s
 	m.mu.Unlock()
@@ -688,12 +692,28 @@ external-controller: 127.0.0.1:9090
 dns:
   enable: true
   enhanced-mode: fake-ip
-  nameserver:
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "+.lan"
+    - "+.local"
+    - "+.ts.net"
+  proxy-server-nameserver:
     - 223.5.5.5
     - 119.29.29.29
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+    - 223.5.5.5
   fallback:
-    - 1.1.1.1
-    - 8.8.8.8
+    - https://dns.cloudflare.com/dns-query
+    - https://dns.google/dns-query
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+  nameserver-policy:
+    "+.ts.net": system
 proxies: []
 proxy-groups:
   - name: Proxy
@@ -701,7 +721,11 @@ proxy-groups:
     proxies:
       - DIRECT
 rules:
+  - DOMAIN-SUFFIX,ts.net,DIRECT
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR6,fd7a:115c:a1e0::/48,DIRECT,no-resolve
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
   - MATCH,Proxy
 `

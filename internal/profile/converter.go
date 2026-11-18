@@ -750,6 +750,7 @@ func convertURIListToMihomo(text string) ([]byte, error) {
 		"allow-lan":  false,
 		"mode":       "rule",
 		"log-level":  "info",
+		"dns":        defaultMihomoDNSMap(),
 		"proxies":    proxies,
 		"proxy-groups": []map[string]any{
 			{
@@ -766,7 +767,11 @@ func convertURIListToMihomo(text string) ([]byte, error) {
 			},
 		},
 		"rules": []string{
+			"DOMAIN-SUFFIX,ts.net,DIRECT",
+			"IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+			"IP-CIDR6,fd7a:115c:a1e0::/48,DIRECT,no-resolve",
 			"IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+			"IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
 			"IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
 			"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
 			"MATCH,Proxy",
@@ -866,6 +871,7 @@ func ConvertSingBoxToMihomo(rawJSON []byte) ([]byte, error) {
 		"allow-lan":    false,
 		"mode":         "rule",
 		"log-level":    "info",
+		"dns":          defaultMihomoDNSMap(),
 		"proxies":      proxies,
 		"proxy-groups": groups,
 		"rules":        clashRules,
@@ -1107,6 +1113,35 @@ func singBoxRulesToClashRules(routeObj map[string]any, defaultFinal string) []st
 		case appendList("DST-PORT", r["port"], ""):
 		case appendList("SRC-PORT", r["source_port"], ""):
 		case appendList("PROCESS-NAME", r["process_name"], ""):
+		case appendList("NETWORK", r["network"], ""):
+		case appendList("GEOSITE", r["geosite"], ""):
+		case appendList("GEOIP", r["geoip"], "no-resolve"):
+		case r["rule_set"] != nil:
+			var sets []string
+			switch t := r["rule_set"].(type) {
+			case string:
+				if t != "" {
+					sets = []string{t}
+				}
+			case []any:
+				sets = strSlice(t)
+			case []string:
+				sets = t
+			}
+			for _, rs := range sets {
+				lowerRS := strings.ToLower(strings.TrimSpace(rs))
+				switch {
+				case strings.HasPrefix(lowerRS, "geosite-"):
+					out = append(out, "GEOSITE,"+strings.TrimPrefix(lowerRS, "geosite-")+","+target)
+				case strings.HasPrefix(lowerRS, "geoip-"):
+					code := strings.TrimPrefix(lowerRS, "geoip-")
+					if code == "private" {
+						out = append(out, "GEOIP,LAN,"+target+",no-resolve")
+					} else {
+						out = append(out, "GEOIP,"+strings.ToUpper(code)+","+target+",no-resolve")
+					}
+				}
+			}
 		case boolVal(r["ip_is_private"]):
 			out = append(out, "GEOIP,LAN,"+target+",no-resolve")
 		}

@@ -139,23 +139,28 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 		if _, hasHijack := tunObj["dns-hijack"]; !hasHijack {
 			tunObj["dns-hijack"] = []string{"any:53"}
 		}
+		excludes := strSlice(tunObj["route-exclude-address"])
+		excludes = appendUniqueStrings(excludes, "100.64.0.0/10", "fd7a:115c:a1e0::/48")
+		tunObj["route-exclude-address"] = excludes
 		cfg["tun"] = tunObj
 
 		dnsObj, _ := cfg["dns"].(map[string]any)
 		if dnsObj == nil {
-			cfg["dns"] = map[string]any{
-				"enable":        true,
-				"enhanced-mode": "fake-ip",
-				"nameserver":    []string{"223.5.5.5", "119.29.29.29"},
-				"fallback":      []string{"1.1.1.1", "8.8.8.8"},
-			}
+			dnsObj = defaultMihomoDNSMap()
 		} else {
 			dnsObj["enable"] = true
+		}
+		ensureMihomoTailscaleDNS(dnsObj)
+		cfg["dns"] = dnsObj
+	} else {
+		if tunObj, ok := cfg["tun"].(map[string]any); ok && tunObj != nil {
+			tunObj["enable"] = false
+			cfg["tun"] = tunObj
+		}
+		if dnsObj, ok := cfg["dns"].(map[string]any); ok && dnsObj != nil && boolVal(dnsObj["enable"]) {
+			ensureMihomoTailscaleDNS(dnsObj)
 			cfg["dns"] = dnsObj
 		}
-	} else if tunObj, ok := cfg["tun"].(map[string]any); ok && tunObj != nil {
-		tunObj["enable"] = false
-		cfg["tun"] = tunObj
 	}
 
 	// 5b. GeoIP / GeoSite database settings.
@@ -188,35 +193,37 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 		cfg["geox-url"] = geox
 	}
 
-	// 6. Custom routing rules injection.
-	if len(settings.CustomRules) > 0 {
-		existing := strSlice(cfg["rules"])
-		var prepended, appended []string
-		for _, r := range settings.CustomRules {
-			if !r.Enabled || strings.TrimSpace(r.Pattern) == "" || strings.TrimSpace(r.Outbound) == "" {
-				continue
-			}
-			lines := customRuleToClashLines(r, cfg)
-			if r.Prepend {
-				prepended = append(prepended, lines...)
-			} else {
-				appended = append(appended, lines...)
-			}
+	// 6. Custom routing rules & Tailscale direct bypass rules injection.
+	existing := strSlice(cfg["rules"])
+	var prepended, appended []string
+	for _, r := range settings.CustomRules {
+		if !r.Enabled || strings.TrimSpace(r.Pattern) == "" || strings.TrimSpace(r.Outbound) == "" {
+			continue
 		}
-		var beforeMatch, afterOrMatch []string
-		for _, line := range existing {
-			upper := strings.ToUpper(strings.TrimSpace(line))
-			if strings.HasPrefix(upper, "MATCH,") || strings.HasPrefix(upper, "FINAL,") || len(afterOrMatch) > 0 {
-				afterOrMatch = append(afterOrMatch, line)
-			} else {
-				beforeMatch = append(beforeMatch, line)
-			}
+		lines := customRuleToClashLines(r, cfg)
+		if r.Prepend {
+			prepended = append(prepended, lines...)
+		} else {
+			appended = append(appended, lines...)
 		}
-		merged := make([]string, 0, len(prepended)+len(existing)+len(appended))
-		merged = append(merged, prepended...)
-		merged = append(merged, beforeMatch...)
-		merged = append(merged, appended...)
-		merged = append(merged, afterOrMatch...)
+	}
+	tailscaleDirect := missingTailscaleClashRules(existing)
+	var beforeMatch, afterOrMatch []string
+	for _, line := range existing {
+		upper := strings.ToUpper(strings.TrimSpace(line))
+		if strings.HasPrefix(upper, "MATCH,") || strings.HasPrefix(upper, "FINAL,") || len(afterOrMatch) > 0 {
+			afterOrMatch = append(afterOrMatch, line)
+		} else {
+			beforeMatch = append(beforeMatch, line)
+		}
+	}
+	merged := make([]string, 0, len(prepended)+len(tailscaleDirect)+len(existing)+len(appended))
+	merged = append(merged, prepended...)
+	merged = append(merged, tailscaleDirect...)
+	merged = append(merged, beforeMatch...)
+	merged = append(merged, appended...)
+	merged = append(merged, afterOrMatch...)
+	if len(merged) > 0 || cfg["rules"] != nil {
 		cfg["rules"] = merged
 	}
 
@@ -225,6 +232,96 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 		return nil, err
 	}
 	return out, nil
+}
+
+func defaultMihomoDNSMap() map[string]any {
+	return map[string]any{
+		"enable":                  true,
+		"enhanced-mode":           "fake-ip",
+		"fake-ip-range":           "198.18.0.1/16",
+		"fake-ip-filter":          []string{"+.lan", "+.local", "+.ts.net"},
+		"proxy-server-nameserver": []string{"223.5.5.5", "119.29.29.29"},
+		"nameserver":              []string{"https://dns.alidns.com/dns-query", "https://doh.pub/dns-query", "223.5.5.5"},
+		"fallback":                []string{"https://dns.cloudflare.com/dns-query", "https://dns.google/dns-query"},
+		"fallback-filter": map[string]any{
+			"geoip":      true,
+			"geoip-code": "CN",
+			"ipcidr":     []string{"240.0.0.0/4"},
+		},
+		"nameserver-policy": map[string]any{
+			"+.ts.net": "system",
+		},
+	}
+}
+
+func ensureMihomoTailscaleDNS(dnsObj map[string]any) {
+	if dnsObj == nil {
+		return
+	}
+	filters := strSlice(dnsObj["fake-ip-filter"])
+	filters = appendUniqueStrings(filters, "+.ts.net")
+	dnsObj["fake-ip-filter"] = filters
+
+	policy, _ := dnsObj["nameserver-policy"].(map[string]any)
+	if policy == nil {
+		policy = map[string]any{}
+	}
+	if _, has := policy["+.ts.net"]; !has {
+		policy["+.ts.net"] = "system"
+	}
+	dnsObj["nameserver-policy"] = policy
+}
+
+func appendUniqueStrings(base []string, extras ...string) []string {
+	seen := make(map[string]struct{}, len(base)+len(extras))
+	out := make([]string, 0, len(base)+len(extras))
+	for _, s := range base {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		k := strings.ToLower(s)
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	for _, s := range extras {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		k := strings.ToLower(s)
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func missingTailscaleClashRules(existing []string) []string {
+	hasRule := func(substr string) bool {
+		upperSub := strings.ToUpper(substr)
+		for _, line := range existing {
+			compact := strings.ReplaceAll(strings.ToUpper(line), " ", "")
+			if strings.Contains(compact, upperSub) {
+				return true
+			}
+		}
+		return false
+	}
+	var out []string
+	if !hasRule(",TS.NET,") {
+		out = append(out, "DOMAIN-SUFFIX,ts.net,DIRECT")
+	}
+	if !hasRule(",100.64.0.0/10,") {
+		out = append(out, "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve")
+	}
+	if !hasRule(",FD7A:115C:A1E0::/48,") {
+		out = append(out, "IP-CIDR6,fd7a:115c:a1e0::/48,DIRECT,no-resolve")
+	}
+	return out
 }
 
 func mapMihomoLogLevel(lvl string) string {

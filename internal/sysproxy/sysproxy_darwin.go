@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	defaultBypass   = "127.0.0.1,localhost,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1,*.local"
-	bypassSeparator = ","
+	legacyDefaultBypass = "127.0.0.1,localhost,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1,*.local"
+	defaultBypass       = "127.0.0.1,localhost,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,100.64.0.0/10,::1,*.ts.net,*.local"
+	bypassSeparator     = ","
 )
 
 func listNetworkServices() ([]string, error) {
