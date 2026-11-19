@@ -75,6 +75,28 @@ rules:
 	if len(rules) < 4 {
 		t.Fatalf("expected parsed rules >= 4, got %d", len(rules))
 	}
+	var hasTSDomain, hasTSCIDR bool
+	for _, r := range rules {
+		if r.Type == "domain_suffix" && r.Payload == "ts.net" && r.Proxy == "direct" {
+			hasTSDomain = true
+		}
+		if r.Type == "ip_cidr" && r.Proxy == "direct" {
+			hasTSCIDR = true
+		}
+	}
+	if !hasTSDomain || !hasTSCIDR {
+		t.Fatalf("expected Tailscale direct rules in converted sing-box config, got %+v", rules)
+	}
+	dnsObj, _ := cfg["dns"].(map[string]any)
+	var hasLocal bool
+	for _, srvRaw := range toSlice(dnsObj["servers"]) {
+		if srv, ok := srvRaw.(map[string]any); ok && srv["type"] == "local" {
+			hasLocal = true
+		}
+	}
+	if !hasLocal {
+		t.Fatalf("expected dns-local server in converted sing-box config, got %+v", dnsObj)
+	}
 }
 
 func TestConvertBase64URIList(t *testing.T) {

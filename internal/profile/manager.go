@@ -565,11 +565,11 @@ func (m *Manager) loadSettings() error {
 	if err != nil {
 		return err
 	}
-	var s model.AppSettings
+	def := model.DefaultSettings()
+	s := def
 	if err := json.Unmarshal(b, &s); err != nil {
 		return err
 	}
-	def := model.DefaultSettings()
 	s.CoreType = model.NormalizeCoreType(s.CoreType)
 	if s.ClashAPIPort <= 0 {
 		s.ClashAPIPort = def.ClashAPIPort
@@ -697,6 +697,9 @@ dns:
     - "+.lan"
     - "+.local"
     - "+.ts.net"
+    - "dns.msftnsci.com"
+    - "www.msftnsci.com"
+    - "www.msftconnecttest.com"
   proxy-server-nameserver:
     - 223.5.5.5
     - 119.29.29.29
@@ -737,8 +740,12 @@ const defaultStarterConfig = `{
   },
   "dns": {
     "servers": [
+      { "type": "local", "tag": "dns-local" },
       { "type": "udp", "tag": "dns-direct", "server": "223.5.5.5" },
       { "type": "udp", "tag": "dns-remote", "server": "1.1.1.1", "detour": "proxy" }
+    ],
+    "rules": [
+      { "domain_suffix": ["ts.net"], "server": "dns-local" }
     ],
     "final": "dns-remote"
   },
@@ -772,6 +779,8 @@ const defaultStarterConfig = `{
     "default_domain_resolver": "dns-direct",
     "rules": [
       { "protocol": "dns", "action": "hijack-dns" },
+      { "domain_suffix": ["ts.net"], "outbound": "direct" },
+      { "ip_cidr": ["100.64.0.0/10", "fd7a:115c:a1e0::/48"], "outbound": "direct" },
       { "ip_is_private": true, "outbound": "direct" }
     ],
     "final": "proxy",

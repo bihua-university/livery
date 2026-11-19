@@ -91,3 +91,35 @@ func TestSettingsSoftwareUpdatesSection(t *testing.T) {
 		t.Fatal("expected UpdatePrereleases persisted and hook called")
 	}
 }
+
+func TestSettingsTUNBypassPrivateRouteCheckbox(t *testing.T) {
+	dir := t.TempDir()
+	pm, err := profile.NewManager(dir)
+	if err != nil {
+		t.Fatalf("profile.NewManager: %v", err)
+	}
+	cm := core.NewManager(dir, dir, nil, nil)
+	a := app.New(pm, cm)
+	t.Cleanup(a.Shutdown)
+
+	if !a.SettingsData.TUNBypassPrivateRoute {
+		t.Fatal("expected TUNBypassPrivateRoute default true")
+	}
+
+	tester := ui.NewTester(func(c *ui.Context) {
+		p := theme.Light()
+		c.SetTheme(theme.BuildUITheme(p, a.SettingsData.UIFontSize))
+		Settings(c, a, p, theme.Scale(14))
+	}, 960, 900)
+
+	if !tester.HasText("绕过私有路由") {
+		t.Fatalf("expected 绕过私有路由 checkbox, texts: %v", tester.Texts())
+	}
+	if err := tester.Click("绕过私有路由"); err != nil {
+		t.Fatalf("Click(绕过私有路由): %v", err)
+	}
+	if a.SettingsData.TUNBypassPrivateRoute {
+		t.Fatal("expected TUNBypassPrivateRoute to toggle false after click")
+	}
+}
+

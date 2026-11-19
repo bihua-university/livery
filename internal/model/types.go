@@ -134,12 +134,13 @@ type AppSettings struct {
 	ProxyGuardInterval int       `json:"proxy_guard_interval_sec"`
 
 	// TUN mode
-	TUNEnabled       bool   `json:"tun_enabled"`
-	TUNStack         string `json:"tun_stack"` // mixed, system, gvisor
-	TUNMTU           int    `json:"tun_mtu"`
-	TUNAutoRoute     bool   `json:"tun_auto_route"`
-	TUNStrictRoute   bool   `json:"tun_strict_route"`
-	TUNInterfaceName string `json:"tun_interface_name"`
+	TUNEnabled            bool   `json:"tun_enabled"`
+	TUNStack              string `json:"tun_stack"` // mixed, system, gvisor
+	TUNMTU                int    `json:"tun_mtu"`
+	TUNAutoRoute          bool   `json:"tun_auto_route"`
+	TUNStrictRoute        bool   `json:"tun_strict_route"`
+	TUNBypassPrivateRoute bool   `json:"tun_bypass_private_route"`
+	TUNInterfaceName      string `json:"tun_interface_name"`
 
 	// Appearance & desktop behavior
 	ThemeMode       ThemeMode    `json:"theme_mode"`
@@ -211,12 +212,13 @@ func DefaultSettings() AppSettings {
 		SystemProxyBypass:  sysproxy.DefaultBypass(),
 		ProxyGuard:         false,
 		ProxyGuardInterval: 10,
-		TUNEnabled:         false,
-		TUNStack:           "mixed",
-		TUNMTU:             9000,
-		TUNAutoRoute:       true,
-		TUNStrictRoute:     true,
-		TUNInterfaceName:   "sing-tun",
+		TUNEnabled:            false,
+		TUNStack:              "mixed",
+		TUNMTU:                9000,
+		TUNAutoRoute:          true,
+		TUNStrictRoute:        true,
+		TUNBypassPrivateRoute: true,
+		TUNInterfaceName:      "sing-tun",
 		GeoDataMode:        false,
 		GeoAutoUpdate:      false,
 		GeoUpdateIntervalH: 24,

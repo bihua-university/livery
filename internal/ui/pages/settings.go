@@ -191,6 +191,9 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 					if ui.Checkbox(c.Key("set-tun-strict"), &a.SettingsData.TUNStrictRoute, "Strict Route").Changed() {
 						a.ApplySettings(a.SettingsData.TUNEnabled)
 					}
+					if ui.Checkbox(c.Key("set-tun-bypass-private"), &a.SettingsData.TUNBypassPrivateRoute, a.Tr("绕过私有路由", "Bypass Private Route")).Changed() {
+						a.ApplySettings(a.SettingsData.TUNEnabled)
+					}
 					ui.Spacer(c)
 					if runtime.GOOS == "windows" && !a.CoreInfo.IsElevated {
 						if components.ActionButton(c, p, s, icons.Shield, a.Tr("以管理员运行", "Elevate (Admin)")).Clicked() {

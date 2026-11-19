@@ -582,11 +582,8 @@ func buildClashTransport(p map[string]any) map[string]any {
 }
 
 func convertClashRules(rawRules []string, validTags map[string]bool, defaultFinal string) ([]any, string) {
-	rules := []any{
-		map[string]any{"protocol": "dns", "action": "hijack-dns"},
-		map[string]any{"ip_is_private": true, "outbound": "direct"},
-	}
 	finalTag := defaultFinal
+	var converted []any
 
 	for _, line := range rawRules {
 		line = strings.TrimSpace(line)
@@ -652,8 +649,15 @@ func convertClashRules(rawRules []string, validTags map[string]bool, defaultFina
 		} else {
 			entry["outbound"] = target
 		}
-		rules = append(rules, entry)
+		converted = append(converted, entry)
 	}
+
+	tailscaleDirect := missingTailscaleSingBoxRules(converted, "direct")
+	rules := make([]any, 0, 2+len(tailscaleDirect)+len(converted))
+	rules = append(rules, map[string]any{"protocol": "dns", "action": "hijack-dns"})
+	rules = append(rules, tailscaleDirect...)
+	rules = append(rules, map[string]any{"ip_is_private": true, "outbound": "direct"})
+	rules = append(rules, converted...)
 	return rules, finalTag
 }
 
@@ -705,6 +709,8 @@ func convertURIList(text string) ([]byte, error) {
 
 	rules := []any{
 		map[string]any{"protocol": "dns", "action": "hijack-dns"},
+		map[string]any{"domain_suffix": []string{"ts.net"}, "outbound": "direct"},
+		map[string]any{"ip_cidr": []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"}, "outbound": "direct"},
 		map[string]any{"ip_is_private": true, "outbound": "direct"},
 	}
 	cfg := buildBaseSingBoxConfig(allOutbounds, rules, "proxy")
@@ -1475,8 +1481,12 @@ func buildBaseSingBoxConfig(outbounds []any, routeRules []any, finalTag string) 
 		},
 		"dns": map[string]any{
 			"servers": []any{
+				map[string]any{"type": "local", "tag": "dns-local"},
 				map[string]any{"type": "udp", "tag": "dns-direct", "server": "223.5.5.5"},
 				map[string]any{"type": "udp", "tag": "dns-remote", "server": "1.1.1.1", "detour": finalTag},
+			},
+			"rules": []any{
+				map[string]any{"domain_suffix": []string{"ts.net"}, "server": "dns-local"},
 			},
 			"final": "dns-remote",
 		},

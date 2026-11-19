@@ -389,3 +389,180 @@ func containsStr(list []string, target string) bool {
 	}
 	return false
 }
+
+func TestLegacySettingsInheritTUNBypassPrivateRouteTrue(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"mixed_port": 7890}`), 0o644); err != nil {
+		t.Fatalf("write legacy settings: %v", err)
+	}
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if !mgr.Settings().TUNBypassPrivateRoute {
+		t.Fatal("expected legacy settings.json without tun_bypass_private_route to inherit true")
+	}
+}
+
+func TestCompileSingBoxTUNAlignmentAndTailscale(t *testing.T) {
+	base := `{
+	  "inbounds": [
+	    {
+	      "type": "tun",
+	      "tag": "tun-in",
+	      "route_exclude_address": ["203.0.113.0/24", "100.64.0.0/10"]
+	    }
+	  ],
+	  "dns": {
+	    "servers": [
+	      { "type": "https", "tag": "dns-remote", "server": "1.1.1.1" }
+	    ],
+	    "rules": []
+	  },
+	  "outbounds": [
+	    { "type": "direct", "tag": "direct-out" }
+	  ],
+	  "route": {
+	    "rules": [
+	      { "protocol": "dns", "action": "hijack-dns" }
+	    ],
+	    "final": "direct-out"
+	  }
+	}`
+
+	settings := model.DefaultSettings()
+	settings.CoreType = model.CoreSingBox
+	settings.TUNEnabled = true
+	settings.TUNBypassPrivateRoute = true
+
+	compiled, err := Compile([]byte(base), model.Profile{}, settings)
+	if err != nil {
+		t.Fatalf("Compile(TUNBypassPrivateRoute=true): %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(compiled, &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	tunIn := findInboundByType(toSlice(parsed["inbounds"]), "tun")
+	if tunIn == nil {
+		t.Fatal("expected tun inbound")
+	}
+	excludes := strSlice(tunIn["route_exclude_address"])
+	for _, want := range []string{"203.0.113.0/24", "10.0.0.0/8", "192.168.0.0/16", "fc00::/7", "100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
+		if !containsStr(excludes, want) {
+			t.Fatalf("expected %q in route_exclude_address, got %v", want, excludes)
+		}
+	}
+	routeObj := parsed["route"].(map[string]any)
+	if routeObj["auto_detect_interface"] != true {
+		t.Fatalf("expected route.auto_detect_interface=true, got %v", routeObj["auto_detect_interface"])
+	}
+	rules := toSlice(routeObj["rules"])
+	if len(rules) < 3 {
+		t.Fatalf("expected hijack-dns + tailscale rules, got %d", len(rules))
+	}
+	if !isSingBoxHijackDNSRule(rules[0]) {
+		t.Fatalf("expected hijack-dns rule to remain before injected Tailscale rules, got %+v", rules[0])
+	}
+
+	dnsObj := parsed["dns"].(map[string]any)
+	var hasLocalServer bool
+	for _, srvRaw := range toSlice(dnsObj["servers"]) {
+		if srv, ok := srvRaw.(map[string]any); ok && srv["type"] == "local" {
+			hasLocalServer = true
+		}
+	}
+	if !hasLocalServer {
+		t.Fatalf("expected local dns server injected for Tailscale MagicDNS, got %+v", dnsObj["servers"])
+	}
+	var hasTSRule bool
+	for _, rRaw := range toSlice(dnsObj["rules"]) {
+		if r, ok := rRaw.(map[string]any); ok && ruleHasStringValue(r["domain_suffix"], "ts.net") {
+			hasTSRule = true
+		}
+	}
+	if !hasTSRule {
+		t.Fatalf("expected ts.net dns rule, got %+v", dnsObj["rules"])
+	}
+
+	// Now verify TUNBypassPrivateRoute = false omits private CIDRs while keeping user & Tailscale excludes.
+	settings.TUNBypassPrivateRoute = false
+	compiledNoPriv, err := Compile([]byte(base), model.Profile{}, settings)
+	if err != nil {
+		t.Fatalf("Compile(TUNBypassPrivateRoute=false): %v", err)
+	}
+	var parsedNoPriv map[string]any
+	if err := json.Unmarshal(compiledNoPriv, &parsedNoPriv); err != nil {
+		t.Fatalf("Unmarshal noPriv: %v", err)
+	}
+	tunNoPriv := findInboundByType(toSlice(parsedNoPriv["inbounds"]), "tun")
+	excludesNoPriv := strSlice(tunNoPriv["route_exclude_address"])
+	if containsStr(excludesNoPriv, "192.168.0.0/16") {
+		t.Fatalf("did not expect private CIDR 192.168.0.0/16 when TUNBypassPrivateRoute=false, got %v", excludesNoPriv)
+	}
+	if !containsStr(excludesNoPriv, "203.0.113.0/24") || !containsStr(excludesNoPriv, "100.64.0.0/10") || !containsStr(excludesNoPriv, "fd7a:115c:a1e0::/48") {
+		t.Fatalf("expected pre-existing and Tailscale excludes preserved, got %v", excludesNoPriv)
+	}
+}
+
+func TestCompileMihomoTUNPrivateRouteAndNCSI(t *testing.T) {
+	settings := model.DefaultSettings()
+	settings.CoreType = model.CoreMihomo
+	settings.TUNEnabled = true
+	settings.TUNBypassPrivateRoute = true
+
+	raw := `proxies: []
+tun:
+  route-exclude-address:
+    - 198.51.100.0/24
+rules:
+  - MATCH,DIRECT
+`
+	compiled, err := CompileMihomo([]byte(raw), model.Profile{}, settings)
+	if err != nil {
+		t.Fatalf("CompileMihomo(true): %v", err)
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal(compiled, &parsed); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	tunObj := parsed["tun"].(map[string]any)
+	excludes := strSlice(tunObj["route-exclude-address"])
+	for _, want := range []string{"198.51.100.0/24", "192.168.0.0/16", "fc00::/7", "100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
+		if !containsStr(excludes, want) {
+			t.Fatalf("expected %q in mihomo route-exclude-address, got %v", want, excludes)
+		}
+	}
+	hijacks := strSlice(tunObj["dns-hijack"])
+	if !containsStr(hijacks, "any:53") {
+		t.Fatalf("expected default dns-hijack any:53, got %v", hijacks)
+	}
+	if runtime.GOOS == "darwin" && tunObj["dns-mode"] != "native" {
+		t.Fatalf("expected darwin mihomo tun.dns-mode=native, got %v", tunObj["dns-mode"])
+	}
+	dnsObj := parsed["dns"].(map[string]any)
+	filters := strSlice(dnsObj["fake-ip-filter"])
+	for _, ncsi := range microsoftNCSIFakeIPFilters {
+		if !containsStr(filters, ncsi) {
+			t.Fatalf("expected NCSI domain %q in fake-ip-filter, got %v", ncsi, filters)
+		}
+	}
+
+	settings.TUNBypassPrivateRoute = false
+	compiledNoPriv, err := CompileMihomo([]byte(raw), model.Profile{}, settings)
+	if err != nil {
+		t.Fatalf("CompileMihomo(false): %v", err)
+	}
+	var parsedNoPriv map[string]any
+	if err := yaml.Unmarshal(compiledNoPriv, &parsedNoPriv); err != nil {
+		t.Fatalf("yaml.Unmarshal noPriv: %v", err)
+	}
+	excludesNoPriv := strSlice(parsedNoPriv["tun"].(map[string]any)["route-exclude-address"])
+	if containsStr(excludesNoPriv, "192.168.0.0/16") {
+		t.Fatalf("did not expect 192.168.0.0/16 when TUNBypassPrivateRoute=false, got %v", excludesNoPriv)
+	}
+	if !containsStr(excludesNoPriv, "198.51.100.0/24") || !containsStr(excludesNoPriv, "100.64.0.0/10") {
+		t.Fatalf("expected custom and Tailscale CIDRs preserved, got %v", excludesNoPriv)
+	}
+}
+

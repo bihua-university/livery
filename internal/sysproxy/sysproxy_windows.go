@@ -4,6 +4,9 @@ package sysproxy
 
 import (
 	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -13,186 +16,353 @@ const (
 	defaultBypass       = "localhost;127.*;192.168.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;100.64.*;100.65.*;100.66.*;100.67.*;100.68.*;100.69.*;100.70.*;100.71.*;100.72.*;100.73.*;100.74.*;100.75.*;100.76.*;100.77.*;100.78.*;100.79.*;100.80.*;100.81.*;100.82.*;100.83.*;100.84.*;100.85.*;100.86.*;100.87.*;100.88.*;100.89.*;100.90.*;100.91.*;100.92.*;100.93.*;100.94.*;100.95.*;100.96.*;100.97.*;100.98.*;100.99.*;100.100.*;100.101.*;100.102.*;100.103.*;100.104.*;100.105.*;100.106.*;100.107.*;100.108.*;100.109.*;100.110.*;100.111.*;100.112.*;100.113.*;100.114.*;100.115.*;100.116.*;100.117.*;100.118.*;100.119.*;100.120.*;100.121.*;100.122.*;100.123.*;100.124.*;100.125.*;100.126.*;100.127.*;*.ts.net;*.local;<local>"
 	bypassSeparator     = ";"
 
-	hkeyCurrentUser            = uintptr(0x80000001)
-	keyRead                    = 0x20019
-	keySetValue                = 0x0002
-	regSZ                      = 1
-	regDword                   = 4
-	errorFileNotFound          = syscall.Errno(2)
-	internetOptionSettingsChg  = 39
-	internetOptionRefresh      = 37
-	internetSettingsSubKeyPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+	internetOptionRefresh             = 37
+	internetOptionSettingsChg         = 39
+	internetOptionPerConnectionOption = 75
+
+	internetPerConnFlags         = 1
+	internetPerConnProxyServer   = 2
+	internetPerConnProxyBypass   = 3
+	internetPerConnAutoConfigURL = 4
+
+	proxyTypeDirect       = 0x00000001
+	proxyTypeProxy        = 0x00000002
+	proxyTypeAutoProxyURL = 0x00000004
+
+	rasErrorBufferTooSmall = 603
+	rasMaxEntryName        = 256
+	winMaxPath             = 260
+
+	wmEndSession = 0x0016
 )
 
-var (
-	advapi32         = syscall.NewLazyDLL("advapi32.dll")
-	regOpenKeyExW    = advapi32.NewProc("RegOpenKeyExW")
-	regQueryValueExW = advapi32.NewProc("RegQueryValueExW")
-	regSetValueExW   = advapi32.NewProc("RegSetValueExW")
-	regDeleteValueW  = advapi32.NewProc("RegDeleteValueW")
-	regCloseKey      = advapi32.NewProc("RegCloseKey")
+type internetPerConnOptionW struct {
+	dwOption uint32
+	value    uint64
+}
 
-	wininet            = syscall.NewLazyDLL("wininet.dll")
-	internetSetOptionW = wininet.NewProc("InternetSetOptionW")
+type internetPerConnOptionListW struct {
+	dwSize        uint32
+	pszConnection *uint16
+	dwOptionCount uint32
+	dwOptionError uint32
+	pOptions      *internetPerConnOptionW
+}
+
+type rasEntryNameW struct {
+	dwSize          uint32
+	szEntryName     [rasMaxEntryName + 1]uint16
+	dwFlags         uint32
+	szPhonebookPath [winMaxPath + 1]uint16
+}
+
+type wndClassW struct {
+	style         uint32
+	lpfnWndProc   uintptr
+	cbClsExtra    int32
+	cbWndExtra    int32
+	hInstance     uintptr
+	hIcon         uintptr
+	hCursor       uintptr
+	hbrBackground uintptr
+	lpszMenuName  *uint16
+	lpszClassName *uint16
+}
+
+type winPoint struct {
+	x int32
+	y int32
+}
+
+type winMsg struct {
+	hwnd    uintptr
+	message uint32
+	wParam  uintptr
+	lParam  uintptr
+	time    uint32
+	pt      winPoint
+}
+
+var (
+	wininet              = syscall.NewLazyDLL("wininet.dll")
+	internetSetOptionW   = wininet.NewProc("InternetSetOptionW")
+	internetQueryOptionW = wininet.NewProc("InternetQueryOptionW")
+
+	rasapi32        = syscall.NewLazyDLL("rasapi32.dll")
+	rasEnumEntriesW = rasapi32.NewProc("RasEnumEntriesW")
+
+	kernel32         = syscall.NewLazyDLL("kernel32.dll")
+	getModuleHandleW = kernel32.NewProc("GetModuleHandleW")
+	globalFree       = kernel32.NewProc("GlobalFree")
+	lstrlenW         = kernel32.NewProc("lstrlenW")
+	lstrcpynW        = kernel32.NewProc("lstrcpynW")
+
+	user32           = syscall.NewLazyDLL("user32.dll")
+	registerClassW   = user32.NewProc("RegisterClassW")
+	createWindowExW  = user32.NewProc("CreateWindowExW")
+	getMessageW      = user32.NewProc("GetMessageW")
+	translateMessage = user32.NewProc("TranslateMessage")
+	dispatchMessageW = user32.NewProc("DispatchMessageW")
+	defWindowProcW   = user32.NewProc("DefWindowProcW")
+
+	winSettingsMu    sync.Mutex
+	appliedProxy     atomic.Bool
+	sessionWatchOnce sync.Once
 )
 
 func setSystemProxy(enable bool, server, _ string, _ int, bypass string) (bool, error) {
-	subKey, err := syscall.UTF16PtrFromString(internetSettingsSubKeyPath)
+	if enable {
+		watchSessionEnd()
+	}
+
+	winSettingsMu.Lock()
+	defer winSettingsMu.Unlock()
+
+	if !enable {
+		err := stopWinINetLocked()
+		return err != nil, err
+	}
+
+	sanitizedBypass := SanitizeWinINetBypass(ParseBypassList(bypass))
+	serverUTF16, err := syscall.UTF16FromString(server)
 	if err != nil {
 		return false, err
 	}
-	var hKey uintptr
-	r0, _, _ := regOpenKeyExW.Call(hkeyCurrentUser, uintptr(unsafe.Pointer(subKey)), 0, keySetValue|keyRead, uintptr(unsafe.Pointer(&hKey)))
-	if r0 != 0 {
-		return false, fmt.Errorf("RegOpenKeyExW failed: %w", syscall.Errno(r0))
-	}
-	defer regCloseKey.Call(hKey)
-
-	partial := false
-	if enable {
-		// Clear stale PAC URL before enabling global proxy so WinINet does not prioritize AutoConfigURL.
-		if err := regDeleteValue(hKey, "AutoConfigURL"); err != nil {
-			return false, err
-		}
-		if err := regSetSZ(hKey, "ProxyServer", server); err != nil {
-			return partial, err
-		}
-		partial = true
-		if err := regSetSZ(hKey, "ProxyOverride", bypass); err != nil {
-			return partial, err
-		}
-		if err := regSetDword(hKey, "ProxyEnable", 1); err != nil {
-			return partial, err
-		}
-	} else {
-		if err := regSetDword(hKey, "ProxyEnable", 0); err != nil {
-			return false, err
-		}
-		partial = true
+	bypassUTF16, err := syscall.UTF16FromString(sanitizedBypass)
+	if err != nil {
+		return false, err
 	}
 
-	notifyWinINet()
-	return partial, nil
+	options := [3]internetPerConnOptionW{
+		{dwOption: internetPerConnFlags, value: proxyTypeDirect | proxyTypeProxy},
+		{dwOption: internetPerConnProxyServer, value: uint64(uintptr(unsafe.Pointer(&serverUTF16[0])))},
+		{dwOption: internetPerConnProxyBypass, value: uint64(uintptr(unsafe.Pointer(&bypassUTF16[0])))},
+	}
+
+	appliedProxy.Store(true)
+	err = applyToConnections(options[:])
+	runtime.KeepAlive(serverUTF16)
+	runtime.KeepAlive(bypassUTF16)
+	if err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
-func notifyWinINet() {
-	internetSetOptionW.Call(0, internetOptionSettingsChg, 0, 0)
-	internetSetOptionW.Call(0, internetOptionRefresh, 0, 0)
+func stopWinINetLocked() error {
+	options := [1]internetPerConnOptionW{
+		{dwOption: internetPerConnFlags, value: proxyTypeDirect},
+	}
+	err := applyToConnections(options[:])
+	if err == nil {
+		appliedProxy.Store(false)
+	}
+	return err
+}
+
+func applyToConnections(options []internetPerConnOptionW) error {
+	var lanErr error
+	forEachConnection(func(conn *uint16) error {
+		err := setPerConnectionOptions(conn, options)
+		if conn == nil {
+			lanErr = err
+		}
+		return err
+	})
+	if lanErr != nil {
+		return lanErr
+	}
+	return notifyWinINet()
+}
+
+func setPerConnectionOptions(conn *uint16, options []internetPerConnOptionW) error {
+	list := internetPerConnOptionListW{
+		dwSize:        uint32(unsafe.Sizeof(internetPerConnOptionListW{})),
+		pszConnection: conn,
+		dwOptionCount: uint32(len(options)),
+		pOptions:      &options[0],
+	}
+	r0, _, callErr := internetSetOptionW.Call(
+		0,
+		internetOptionPerConnectionOption,
+		uintptr(unsafe.Pointer(&list)),
+		uintptr(list.dwSize),
+	)
+	if r0 == 0 {
+		if callErr != nil && callErr != syscall.Errno(0) {
+			return fmt.Errorf("InternetSetOptionW failed: %w", callErr)
+		}
+		return fmt.Errorf("InternetSetOptionW failed")
+	}
+	return nil
+}
+
+// forEachConnection invokes fn for the LAN settings (conn == nil) and every
+// configured dial-up / VPN RAS entry, each of which stores independent WinINet proxy state.
+func forEachConnection(fn func(conn *uint16) error) {
+	_ = fn(nil)
+
+	if rasEnumEntriesW.Find() != nil {
+		return
+	}
+	var size, count uint32
+	ret, _, _ := rasEnumEntriesW.Call(0, 0, 0, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&count)))
+	if ret != rasErrorBufferTooSmall || count == 0 {
+		return
+	}
+	entrySize := uint32(unsafe.Sizeof(rasEntryNameW{}))
+	needed := (size + entrySize - 1) / entrySize
+	if uint32(count) > needed {
+		needed = count
+	}
+	entries := make([]rasEntryNameW, needed)
+	for i := range entries {
+		entries[i].dwSize = entrySize
+	}
+	size = needed * entrySize
+	ret, _, _ = rasEnumEntriesW.Call(0, 0, uintptr(unsafe.Pointer(&entries[0])), uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&count)))
+	if ret != 0 {
+		return
+	}
+	limit := int(count)
+	if limit > len(entries) {
+		limit = len(entries)
+	}
+	for i := range limit {
+		_ = fn(&entries[i].szEntryName[0])
+	}
+}
+
+func notifyWinINet() error {
+	r0, _, err0 := internetSetOptionW.Call(0, internetOptionSettingsChg, 0, 0)
+	r1, _, err1 := internetSetOptionW.Call(0, internetOptionRefresh, 0, 0)
+	if r0 == 0 {
+		if err0 != nil && err0 != syscall.Errno(0) {
+			return fmt.Errorf("InternetSetOptionW(SETTINGS_CHANGED) failed: %w", err0)
+		}
+		return fmt.Errorf("InternetSetOptionW(SETTINGS_CHANGED) failed")
+	}
+	if r1 == 0 {
+		if err1 != nil && err1 != syscall.Errno(0) {
+			return fmt.Errorf("InternetSetOptionW(REFRESH) failed: %w", err1)
+		}
+		return fmt.Errorf("InternetSetOptionW(REFRESH) failed")
+	}
+	return nil
 }
 
 func getSystemProxy() (Status, error) {
-	subKey, err := syscall.UTF16PtrFromString(internetSettingsSubKeyPath)
-	if err != nil {
-		return Status{}, err
+	options := [4]internetPerConnOptionW{
+		{dwOption: internetPerConnFlags},
+		{dwOption: internetPerConnProxyServer},
+		{dwOption: internetPerConnProxyBypass},
+		{dwOption: internetPerConnAutoConfigURL},
 	}
-	var hKey uintptr
-	r0, _, _ := regOpenKeyExW.Call(hkeyCurrentUser, uintptr(unsafe.Pointer(subKey)), 0, keyRead, uintptr(unsafe.Pointer(&hKey)))
-	if r0 != 0 {
-		return Status{}, fmt.Errorf("RegOpenKeyExW failed: %w", syscall.Errno(r0))
+	size := uint32(unsafe.Sizeof(internetPerConnOptionListW{}))
+	list := internetPerConnOptionListW{
+		dwSize:        size,
+		dwOptionCount: uint32(len(options)),
+		pOptions:      &options[0],
 	}
-	defer regCloseKey.Call(hKey)
-
-	enabled, err := regGetDword(hKey, "ProxyEnable")
-	if err != nil {
-		return Status{}, err
-	}
-	server, err := regGetSZ(hKey, "ProxyServer")
-	if err != nil {
-		return Status{}, err
-	}
-	bypass, err := regGetSZ(hKey, "ProxyOverride")
-	if err != nil {
-		return Status{}, err
-	}
-	autoConfigURL, err := regGetSZ(hKey, "AutoConfigURL")
-	if err != nil {
-		return Status{}, err
-	}
-	return Status{
-		Enabled:       enabled != 0,
-		Server:        server,
-		Bypass:        bypass,
-		AutoConfigURL: autoConfigURL,
-	}, nil
-}
-
-func regDeleteValue(hKey uintptr, name string) error {
-	nPtr, err := syscall.UTF16PtrFromString(name)
-	if err != nil {
-		return err
-	}
-	r0, _, _ := regDeleteValueW.Call(hKey, uintptr(unsafe.Pointer(nPtr)))
-	if r0 != 0 && syscall.Errno(r0) != errorFileNotFound {
-		return fmt.Errorf("RegDeleteValueW(%s) failed: %w", name, syscall.Errno(r0))
-	}
-	return nil
-}
-
-func regSetDword(hKey uintptr, name string, val uint32) error {
-	nPtr, err := syscall.UTF16PtrFromString(name)
-	if err != nil {
-		return err
-	}
-	r0, _, _ := regSetValueExW.Call(hKey, uintptr(unsafe.Pointer(nPtr)), 0, regDword, uintptr(unsafe.Pointer(&val)), 4)
-	if r0 != 0 {
-		return fmt.Errorf("RegSetValueExW(%s) failed: %w", name, syscall.Errno(r0))
-	}
-	return nil
-}
-
-func regSetSZ(hKey uintptr, name, val string) error {
-	nPtr, err := syscall.UTF16PtrFromString(name)
-	if err != nil {
-		return err
-	}
-	vSlice, err := syscall.UTF16FromString(val)
-	if err != nil {
-		return err
-	}
-	r0, _, _ := regSetValueExW.Call(hKey, uintptr(unsafe.Pointer(nPtr)), 0, regSZ, uintptr(unsafe.Pointer(&vSlice[0])), uintptr(len(vSlice)*2))
-	if r0 != 0 {
-		return fmt.Errorf("RegSetValueExW(%s) failed: %w", name, syscall.Errno(r0))
-	}
-	return nil
-}
-
-func regGetDword(hKey uintptr, name string) (uint32, error) {
-	nPtr, err := syscall.UTF16PtrFromString(name)
-	if err != nil {
-		return 0, err
-	}
-	var typ, val, size uint32
-	size = 4
-	r0, _, _ := regQueryValueExW.Call(hKey, uintptr(unsafe.Pointer(nPtr)), 0, uintptr(unsafe.Pointer(&typ)), uintptr(unsafe.Pointer(&val)), uintptr(unsafe.Pointer(&size)))
-	if r0 != 0 {
-		if syscall.Errno(r0) == errorFileNotFound {
-			return 0, nil
+	r0, _, callErr := internetQueryOptionW.Call(
+		0,
+		internetOptionPerConnectionOption,
+		uintptr(unsafe.Pointer(&list)),
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if r0 == 0 {
+		if callErr != nil && callErr != syscall.Errno(0) {
+			return Status{}, fmt.Errorf("InternetQueryOptionW failed: %w", callErr)
 		}
-		return 0, fmt.Errorf("RegQueryValueExW(%s) failed: %w", name, syscall.Errno(r0))
+		return Status{}, fmt.Errorf("InternetQueryOptionW failed")
 	}
-	return val, nil
+
+	flags := uint32(options[0].value)
+	server := takeGlobalUTF16String(uintptr(options[1].value))
+	bypass := takeGlobalUTF16String(uintptr(options[2].value))
+	autoConfigURL := takeGlobalUTF16String(uintptr(options[3].value))
+
+	st := Status{
+		Enabled: (flags & proxyTypeProxy) != 0,
+		Server:  server,
+		Bypass:  bypass,
+	}
+	if (flags & proxyTypeAutoProxyURL) != 0 {
+		st.AutoConfigURL = autoConfigURL
+	}
+	return st, nil
 }
 
-func regGetSZ(hKey uintptr, name string) (string, error) {
-	nPtr, err := syscall.UTF16PtrFromString(name)
-	if err != nil {
-		return "", err
+func takeGlobalUTF16String(ptr uintptr) string {
+	if ptr == 0 {
+		return ""
 	}
-	var typ, size uint32
-	r0, _, _ := regQueryValueExW.Call(hKey, uintptr(unsafe.Pointer(nPtr)), 0, uintptr(unsafe.Pointer(&typ)), 0, uintptr(unsafe.Pointer(&size)))
-	if r0 != 0 {
-		if syscall.Errno(r0) == errorFileNotFound {
-			return "", nil
-		}
-		return "", fmt.Errorf("RegQueryValueExW(%s) failed: %w", name, syscall.Errno(r0))
+	defer globalFree.Call(ptr)
+	n, _, _ := lstrlenW.Call(ptr)
+	if n == 0 {
+		return ""
 	}
-	if size == 0 {
-		return "", nil
-	}
-	buf := make([]uint16, size/2+1)
-	r0, _, _ = regQueryValueExW.Call(hKey, uintptr(unsafe.Pointer(nPtr)), 0, uintptr(unsafe.Pointer(&typ)), uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)))
-	if r0 != 0 {
-		return "", fmt.Errorf("RegQueryValueExW(%s) failed: %w", name, syscall.Errno(r0))
-	}
-	return syscall.UTF16ToString(buf), nil
+	buf := make([]uint16, n+1)
+	lstrcpynW.Call(uintptr(unsafe.Pointer(&buf[0])), ptr, n+1)
+	return syscall.UTF16ToString(buf)
 }
+
+func watchSessionEnd() {
+	sessionWatchOnce.Do(func() {
+		go runSessionWindow()
+	})
+}
+
+func runSessionWindow() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	instance, _, _ := getModuleHandleW.Call(0)
+	className, err := syscall.UTF16PtrFromString("LiverySystemProxySession")
+	if err != nil {
+		return
+	}
+	wc := wndClassW{
+		lpfnWndProc:   syscall.NewCallback(sessionWindowProc),
+		hInstance:     instance,
+		lpszClassName: className,
+	}
+	atom, _, _ := registerClassW.Call(uintptr(unsafe.Pointer(&wc)))
+	if atom == 0 {
+		return
+	}
+	hwnd, _, _ := createWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		0,
+		0,
+		0, 0, 0, 0,
+		0, 0,
+		instance,
+		0,
+	)
+	if hwnd == 0 {
+		return
+	}
+	var msg winMsg
+	for {
+		ret, _, _ := getMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		if int32(ret) <= 0 {
+			break
+		}
+		translateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+		dispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+	}
+}
+
+func sessionWindowProc(hwnd, msg, wParam, lParam uintptr) uintptr {
+	if msg == wmEndSession && wParam != 0 && appliedProxy.Load() {
+		winSettingsMu.Lock()
+		_ = stopWinINetLocked()
+		winSettingsMu.Unlock()
+		return 0
+	}
+	ret, _, _ := defWindowProcW.Call(hwnd, msg, wParam, lParam)
+	return ret
+}
+

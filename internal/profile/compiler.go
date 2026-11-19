@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -136,11 +137,17 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 		tunObj["strict-route"] = settings.TUNStrictRoute
 		tunObj["auto-detect-interface"] = true
 		tunObj["device"] = iface
-		if _, hasHijack := tunObj["dns-hijack"]; !hasHijack {
+		if len(strSlice(tunObj["dns-hijack"])) == 0 {
 			tunObj["dns-hijack"] = []string{"any:53"}
 		}
+		if runtime.GOOS == "darwin" && strings.TrimSpace(strVal(tunObj["dns-mode"])) == "" {
+			tunObj["dns-mode"] = "native"
+		}
 		excludes := strSlice(tunObj["route-exclude-address"])
-		excludes = appendUniqueStrings(excludes, "100.64.0.0/10", "fd7a:115c:a1e0::/48")
+		if settings.TUNBypassPrivateRoute {
+			excludes = appendUniqueStrings(excludes, privateRouteAddresses...)
+		}
+		excludes = appendUniqueStrings(excludes, tailscaleRouteExcludeAddresses...)
 		tunObj["route-exclude-address"] = excludes
 		cfg["tun"] = tunObj
 
@@ -234,12 +241,37 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 	return out, nil
 }
 
+var privateRouteAddresses = []string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"224.0.0.0/4",
+	"255.255.255.255/32",
+	"fc00::/7",
+	"fe80::/10",
+	"ff00::/8",
+}
+
+var tailscaleRouteExcludeAddresses = []string{
+	"100.64.0.0/10",
+	"fd7a:115c:a1e0::/48",
+}
+
+var microsoftNCSIFakeIPFilters = []string{
+	"dns.msftnsci.com",
+	"www.msftnsci.com",
+	"www.msftconnecttest.com",
+}
+
 func defaultMihomoDNSMap() map[string]any {
 	return map[string]any{
 		"enable":                  true,
 		"enhanced-mode":           "fake-ip",
 		"fake-ip-range":           "198.18.0.1/16",
-		"fake-ip-filter":          []string{"+.lan", "+.local", "+.ts.net"},
+		"fake-ip-filter":          append([]string{"+.lan", "+.local", "+.ts.net"}, microsoftNCSIFakeIPFilters...),
 		"proxy-server-nameserver": []string{"223.5.5.5", "119.29.29.29"},
 		"nameserver":              []string{"https://dns.alidns.com/dns-query", "https://doh.pub/dns-query", "223.5.5.5"},
 		"fallback":                []string{"https://dns.cloudflare.com/dns-query", "https://dns.google/dns-query"},
@@ -259,7 +291,7 @@ func ensureMihomoTailscaleDNS(dnsObj map[string]any) {
 		return
 	}
 	filters := strSlice(dnsObj["fake-ip-filter"])
-	filters = appendUniqueStrings(filters, "+.ts.net")
+	filters = appendUniqueStrings(filters, append([]string{"+.ts.net"}, microsoftNCSIFakeIPFilters...)...)
 	dnsObj["fake-ip-filter"] = filters
 
 	policy, _ := dnsObj["nameserver-policy"].(map[string]any)
@@ -488,44 +520,80 @@ func Compile(rawJSON []byte, prof model.Profile, settings model.AppSettings) ([]
 		if iface == "" {
 			iface = "sing-tun"
 		}
+		var excludes []string
+		if existingTUN := findInboundByType(inbounds, "tun"); existingTUN != nil {
+			excludes = strSlice(existingTUN["route_exclude_address"])
+		}
+		if settings.TUNBypassPrivateRoute {
+			excludes = appendUniqueStrings(excludes, privateRouteAddresses...)
+		}
+		excludes = appendUniqueStrings(excludes, tailscaleRouteExcludeAddresses...)
 		tun := map[string]any{
-			"type":           "tun",
-			"tag":            "tun-in",
-			"interface_name": iface,
-			"address":        []string{"172.19.0.1/30"},
-			"mtu":            mtu,
-			"auto_route":     settings.TUNAutoRoute,
-			"strict_route":   settings.TUNStrictRoute,
-			"stack":          stack,
+			"type":                  "tun",
+			"tag":                   "tun-in",
+			"interface_name":        iface,
+			"address":               []string{"172.19.0.1/30"},
+			"mtu":                   mtu,
+			"auto_route":            settings.TUNAutoRoute,
+			"strict_route":          settings.TUNStrictRoute,
+			"stack":                 stack,
+			"route_exclude_address": excludes,
 		}
 		inbounds = upsertInbound(inbounds, "tun", tun)
+
+		routeObj, _ := cfg["route"].(map[string]any)
+		if routeObj == nil {
+			routeObj = map[string]any{}
+		}
+		routeObj["auto_detect_interface"] = true
+		cfg["route"] = routeObj
 	} else {
 		inbounds = removeInboundType(inbounds, "tun")
 	}
 	cfg["inbounds"] = inbounds
 
-	// 5. Custom routing rules injection.
-	if len(settings.CustomRules) > 0 {
-		routeObj, _ := cfg["route"].(map[string]any)
-		if routeObj == nil {
-			routeObj = map[string]any{}
+	// 4b. Tailscale MagicDNS resolution via local/system DNS in sing-box DNS config.
+	if dnsObj, ok := cfg["dns"].(map[string]any); ok && dnsObj != nil {
+		ensureSingBoxTailscaleDNS(dnsObj, settings.TUNEnabled)
+		cfg["dns"] = dnsObj
+	}
+
+	// 5. Custom routing rules & Tailscale direct bypass rules injection.
+	routeObj, _ := cfg["route"].(map[string]any)
+	if routeObj == nil {
+		routeObj = map[string]any{}
+	}
+	existing := toSlice(routeObj["rules"])
+	var prepended, appended []any
+	for _, r := range settings.CustomRules {
+		if !r.Enabled || strings.TrimSpace(r.Pattern) == "" || strings.TrimSpace(r.Outbound) == "" {
+			continue
 		}
-		existing := toSlice(routeObj["rules"])
-		var prepended, appended []any
-		for _, r := range settings.CustomRules {
-			if !r.Enabled || strings.TrimSpace(r.Pattern) == "" || strings.TrimSpace(r.Outbound) == "" {
-				continue
-			}
-			obj := customRuleToSingBox(r)
-			if r.Prepend {
-				prepended = append(prepended, obj)
+		obj := customRuleToSingBox(r)
+		if r.Prepend {
+			prepended = append(prepended, obj)
+		} else {
+			appended = append(appended, obj)
+		}
+	}
+	var tailscaleDirect []any
+	if directTag := findSingBoxDirectTag(cfg); directTag != "" {
+		tailscaleDirect = missingTailscaleSingBoxRules(existing, directTag)
+	}
+	if len(prepended) > 0 || len(tailscaleDirect) > 0 || len(appended) > 0 {
+		var leadingHijack, restExisting []any
+		for i, raw := range existing {
+			if len(restExisting) == 0 && isSingBoxHijackDNSRule(raw) {
+				leadingHijack = append(leadingHijack, existing[i])
 			} else {
-				appended = append(appended, obj)
+				restExisting = append(restExisting, existing[i])
 			}
 		}
-		merged := make([]any, 0, len(prepended)+len(existing)+len(appended))
+		merged := make([]any, 0, len(prepended)+len(leadingHijack)+len(tailscaleDirect)+len(restExisting)+len(appended))
 		merged = append(merged, prepended...)
-		merged = append(merged, existing...)
+		merged = append(merged, leadingHijack...)
+		merged = append(merged, tailscaleDirect...)
+		merged = append(merged, restExisting...)
 		merged = append(merged, appended...)
 		routeObj["rules"] = merged
 		cfg["route"] = routeObj
@@ -536,6 +604,162 @@ func Compile(rawJSON []byte, prof model.Profile, settings model.AppSettings) ([]
 		return nil, err
 	}
 	return append(out, '\n'), nil
+}
+
+func findInboundByType(inbounds []any, typ string) map[string]any {
+	for _, raw := range inbounds {
+		if m, ok := raw.(map[string]any); ok {
+			if strings.EqualFold(strVal(m["type"]), typ) {
+				return m
+			}
+		}
+	}
+	return nil
+}
+
+func ensureSingBoxTailscaleDNS(dnsObj map[string]any, tunEnabled bool) {
+	if dnsObj == nil {
+		return
+	}
+	servers := toSlice(dnsObj["servers"])
+	usedTags := make(map[string]bool, len(servers))
+	localTag := ""
+	for _, raw := range servers {
+		srv, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		tag := strings.TrimSpace(strVal(srv["tag"]))
+		if tag != "" {
+			usedTags[strings.ToLower(tag)] = true
+		}
+		if localTag == "" && strings.EqualFold(strVal(srv["type"]), "local") {
+			localTag = tag
+			if localTag == "" {
+				localTag = "dns-local"
+				if usedTags[localTag] {
+					localTag = "dns-local-ts"
+				}
+				srv["tag"] = localTag
+				usedTags[strings.ToLower(localTag)] = true
+			}
+		}
+	}
+	if localTag == "" {
+		if !tunEnabled {
+			return
+		}
+		localTag = "dns-local"
+		for i := 2; usedTags[strings.ToLower(localTag)]; i++ {
+			localTag = fmt.Sprintf("dns-local-%d", i)
+		}
+		servers = append([]any{map[string]any{"type": "local", "tag": localTag}}, servers...)
+		dnsObj["servers"] = servers
+	}
+
+	rules := toSlice(dnsObj["rules"])
+	for _, raw := range rules {
+		r, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if ruleHasStringValue(r["domain_suffix"], "ts.net") || ruleHasStringValue(r["domain"], "ts.net") {
+			return
+		}
+	}
+	tsRule := map[string]any{
+		"domain_suffix": []string{"ts.net"},
+		"server":        localTag,
+	}
+	dnsObj["rules"] = append([]any{tsRule}, rules...)
+}
+
+func findSingBoxDirectTag(cfg map[string]any) string {
+	for _, raw := range toSlice(cfg["outbounds"]) {
+		ob, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strVal(ob["type"]), "direct") {
+			if tag := strings.TrimSpace(strVal(ob["tag"])); tag != "" {
+				return tag
+			}
+		}
+	}
+	return ""
+}
+
+func missingTailscaleSingBoxRules(existing []any, directTag string) []any {
+	hasDomain := false
+	hasV4 := false
+	hasV6 := false
+	for _, raw := range existing {
+		r, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if ruleHasStringValue(r["domain_suffix"], "ts.net") {
+			hasDomain = true
+		}
+		if ruleHasStringValue(r["ip_cidr"], "100.64.0.0/10") {
+			hasV4 = true
+		}
+		if ruleHasStringValue(r["ip_cidr"], "fd7a:115c:a1e0::/48") {
+			hasV6 = true
+		}
+	}
+	var out []any
+	if !hasDomain {
+		out = append(out, map[string]any{
+			"domain_suffix": []string{"ts.net"},
+			"outbound":      directTag,
+		})
+	}
+	var cidrs []string
+	if !hasV4 {
+		cidrs = append(cidrs, "100.64.0.0/10")
+	}
+	if !hasV6 {
+		cidrs = append(cidrs, "fd7a:115c:a1e0::/48")
+	}
+	if len(cidrs) > 0 {
+		out = append(out, map[string]any{
+			"ip_cidr":  cidrs,
+			"outbound": directTag,
+		})
+	}
+	return out
+}
+
+func ruleHasStringValue(v any, target string) bool {
+	switch t := v.(type) {
+	case string:
+		return strings.EqualFold(strings.TrimSpace(t), target)
+	case []string:
+		for _, item := range t {
+			if strings.EqualFold(strings.TrimSpace(item), target) {
+				return true
+			}
+		}
+	case []any:
+		for _, raw := range t {
+			if strings.EqualFold(strings.TrimSpace(strVal(raw)), target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSingBoxHijackDNSRule(raw any) bool {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return false
+	}
+	if strings.EqualFold(strVal(m["action"]), "hijack-dns") {
+		return true
+	}
+	return strings.EqualFold(strVal(m["protocol"]), "dns") && strings.EqualFold(strVal(m["outbound"]), "dns-out")
 }
 
 // ParseRulesFromConfig extracts human-readable rule entries from a sing-box JSON or Mihomo YAML config.

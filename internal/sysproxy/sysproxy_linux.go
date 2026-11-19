@@ -3,9 +3,10 @@
 package sysproxy
 
 import (
-	"fmt"
+	"errors"
+	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
 	"strings"
 )
 
@@ -15,54 +16,75 @@ const (
 	bypassSeparator     = ","
 )
 
-func setSystemProxy(enable bool, _ string, host string, port int, bypass string) (bool, error) {
-	if _, err := exec.LookPath("gsettings"); err != nil {
-		return false, fmt.Errorf("gsettings not found: %w", err)
+func linuxEnvironment() (home string, backend linuxBackend, tool string, err error) {
+	home = strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		var hErr error
+		home, hErr = os.UserHomeDir()
+		if hErr != nil || strings.TrimSpace(home) == "" {
+			return "", backendGNOME, "", errors.New("HOME directory not set")
+		}
 	}
-	if !enable {
-		err := exec.Command("gsettings", "set", "org.gnome.system.proxy", "mode", "none").Run()
-		return err == nil, err
+	desktop := os.Getenv("XDG_CURRENT_DESKTOP")
+	b, t, ok := resolveLinuxBackend(desktop, func(name string) bool {
+		_, err := exec.LookPath(name)
+		return err == nil
+	})
+	if !ok {
+		return "", backendGNOME, "", errors.New("no supported desktop proxy tool found (gsettings or kwriteconfig6/kwriteconfig5)")
+	}
+	return home, b, t, nil
+}
+
+func setSystemProxy(enable bool, _ string, host string, port int, bypass string) (bool, error) {
+	home, backend, tool, err := linuxEnvironment()
+	if err != nil {
+		return false, err
+	}
+	var cmds []sysCommand
+	if enable {
+		cmds = linuxManualCommands(backend, tool, home, host, port, bypass)
+	} else {
+		cmds = linuxStopCommands(backend, tool, home)
 	}
 
-	p := strconv.Itoa(port)
 	partial := false
-	for _, proto := range []string{"http", "https", "socks"} {
-		schema := "org.gnome.system.proxy." + proto
-		if err := exec.Command("gsettings", "set", schema, "host", host).Run(); err != nil {
+	for _, cmd := range cmds {
+		if err := exec.Command(cmd.Program, cmd.Args...).Run(); err != nil {
+			if cmd.Optional {
+				continue
+			}
 			return partial, err
 		}
 		partial = true
-		if err := exec.Command("gsettings", "set", schema, "port", p).Run(); err != nil {
-			return partial, err
-		}
 	}
-
-	var ignores []string
-	for _, part := range ParseBypassList(bypass) {
-		if !strings.EqualFold(part, "<local>") {
-			ignores = append(ignores, fmt.Sprintf("%q", part))
-		}
-	}
-	if len(ignores) > 0 {
-		if err := exec.Command("gsettings", "set", "org.gnome.system.proxy", "ignore-hosts", "["+strings.Join(ignores, ", ")+"]").Run(); err != nil {
-			return partial, err
-		}
-	}
-
-	if err := exec.Command("gsettings", "set", "org.gnome.system.proxy", "mode", "manual").Run(); err != nil {
-		return partial, err
-	}
-	return true, nil
+	return partial, nil
 }
 
 func getSystemProxy() (Status, error) {
-	out, err := exec.Command("gsettings", "get", "org.gnome.system.proxy", "mode").Output()
+	home, backend, _, err := linuxEnvironment()
+	if err != nil {
+		return Status{}, err
+	}
+	if backend == backendKDE {
+		data, err := os.ReadFile(filepath.Join(home, ".config", "kioslaverc"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return Status{Enabled: false}, nil
+			}
+			return Status{}, err
+		}
+		return parseKioslavercStatus(string(data)), nil
+	}
+
+	schema := linuxGSettingsSchema(backend)
+	out, err := exec.Command("gsettings", "get", schema, "mode").Output()
 	if err != nil {
 		return Status{}, err
 	}
 	mode := strings.Trim(strings.TrimSpace(string(out)), "'\"")
 	if mode == "auto" {
-		uOut, _ := exec.Command("gsettings", "get", "org.gnome.system.proxy", "autoconfig-url").Output()
+		uOut, _ := exec.Command("gsettings", "get", schema, "autoconfig-url").Output()
 		return Status{
 			Enabled:       false,
 			AutoConfigURL: strings.Trim(strings.TrimSpace(string(uOut)), "'\""),
@@ -71,9 +93,9 @@ func getSystemProxy() (Status, error) {
 	if mode != "manual" {
 		return Status{Enabled: false}, nil
 	}
-	hOut, _ := exec.Command("gsettings", "get", "org.gnome.system.proxy.http", "host").Output()
-	pOut, _ := exec.Command("gsettings", "get", "org.gnome.system.proxy.http", "port").Output()
-	iOut, _ := exec.Command("gsettings", "get", "org.gnome.system.proxy", "ignore-hosts").Output()
+	hOut, _ := exec.Command("gsettings", "get", schema+".http", "host").Output()
+	pOut, _ := exec.Command("gsettings", "get", schema+".http", "port").Output()
+	iOut, _ := exec.Command("gsettings", "get", schema, "ignore-hosts").Output()
 	host := strings.Trim(strings.TrimSpace(string(hOut)), "'\"")
 	port := strings.TrimSpace(string(pOut))
 
