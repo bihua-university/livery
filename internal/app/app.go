@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"runtime/metrics"
 	"slices"
 	"sort"
 	"strings"
@@ -195,6 +194,7 @@ type App struct {
 	hiddenPeakDown    int64
 	hasHiddenTraffic  bool
 	streamedCoreMem   atomic.Int64
+	overviewVisible   atomic.Bool
 }
 
 // New constructs the application controller.
@@ -554,6 +554,30 @@ func (a *App) RequestSnapshotSync() {
 	}
 }
 
+// SetOverviewVisible tracks whether the Overview page is currently visible and refreshes app RSS on entry.
+func (a *App) SetOverviewVisible(visible bool) {
+	was := a.overviewVisible.Swap(visible)
+	if visible && !was {
+		a.RefreshAppMemoryAsync()
+	}
+}
+
+// RefreshAppMemoryAsync samples current process RSS off the UI thread and publishes updates to Overview.
+func (a *App) RefreshAppMemoryAsync() {
+	go func() {
+		if a.shuttingDown.Load() || a.WindowHidden.Load() || !a.overviewVisible.Load() {
+			return
+		}
+		appMem := sampleAppMemory()
+		a.UpdateUI(func() {
+			if a.WindowHidden.Load() || a.Page != PageOverview {
+				return
+			}
+			a.AppMemoryBytes = appMem
+		})
+	}()
+}
+
 // SyncRulesForView lazily loads routing rules only while the Rules page is open.
 func (a *App) SyncRulesForView() {
 	if !a.hasLoadedRules {
@@ -680,6 +704,35 @@ func (a *App) StartBackground(ctx context.Context) {
 				guardTimer.Reset(a.proxyGuardDuration())
 			case <-subTicker.C:
 				a.checkAutoUpdates(ctx)
+			}
+		}
+	}()
+	go func() {
+		memTicker := time.NewTicker(2 * time.Second)
+		defer memTicker.Stop()
+		var lastMem int64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-memTicker.C:
+				if a.shuttingDown.Load() || a.WindowHidden.Load() || !a.overviewVisible.Load() {
+					continue
+				}
+				if a.CM.Info().Status == model.CoreRunning {
+					continue
+				}
+				appMem := sampleAppMemory()
+				if appMem == lastMem {
+					continue
+				}
+				lastMem = appMem
+				a.UpdateUI(func() {
+					if a.WindowHidden.Load() || a.Page != PageOverview {
+						return
+					}
+					a.AppMemoryBytes = appMem
+				})
 			}
 		}
 	}()
@@ -1476,29 +1529,6 @@ func groupOrderRank(g model.ProxyGroup, mode model.ProxyMode) int {
 		}
 	}
 	return 3
-}
-
-func sampleAppMemory() int64 {
-	var samples [3]metrics.Sample
-	samples[0].Name = "/memory/classes/total:bytes"
-	samples[1].Name = "/memory/classes/heap/released:bytes"
-	samples[2].Name = "/memory/classes/heap/objects:bytes"
-	metrics.Read(samples[:])
-
-	var total, released, objects uint64
-	if samples[0].Value.Kind() == metrics.KindUint64 {
-		total = samples[0].Value.Uint64()
-	}
-	if samples[1].Value.Kind() == metrics.KindUint64 {
-		released = samples[1].Value.Uint64()
-	}
-	if samples[2].Value.Kind() == metrics.KindUint64 {
-		objects = samples[2].Value.Uint64()
-	}
-	if total > released {
-		return int64(total - released)
-	}
-	return int64(objects)
 }
 
 func detectLocalIPv4() string {

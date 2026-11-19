@@ -18,6 +18,7 @@ import (
 func View(c *ui.Context, a *app.App) {
 	hidden := c.WindowHidden()
 	wasHidden := a.WindowHidden.Swap(hidden)
+	a.SetOverviewVisible(!hidden && a.Page == app.PageOverview)
 	if hidden {
 		a.ReleaseLogsView()
 		a.ReleaseRulesView()
