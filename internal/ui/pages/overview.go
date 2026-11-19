@@ -392,12 +392,20 @@ func trafficChart(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale)
 		return
 	}
 	maxVal := 1024.0
+	hasDown := false
+	hasUp := false
 	for _, sample := range a.TrafficHistory {
-		if float64(sample.Down) > maxVal {
-			maxVal = float64(sample.Down)
+		if sample.Down > 0 {
+			hasDown = true
+			if float64(sample.Down) > maxVal {
+				maxVal = float64(sample.Down)
+			}
 		}
-		if float64(sample.Up) > maxVal {
-			maxVal = float64(sample.Up)
+		if sample.Up > 0 {
+			hasUp = true
+			if float64(sample.Up) > maxVal {
+				maxVal = float64(sample.Up)
+			}
 		}
 	}
 
@@ -435,11 +443,161 @@ func trafficChart(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale)
 				yPos := chart.Y(r, tick.At)
 				painter.Line(r.X, yPos, r.X+r.W, yPos, 1, p.Border)
 			}
-			painter.FillPath(chart.Area(r, xs, nil, ysDown, chart.CurveMonotone), p.ChartDown.Alpha(0.14))
-			painter.StrokePath(chart.Line(r, xs, ysDown, chart.CurveMonotone), 2, p.ChartDown)
+			// Render curves with GPU-native StrokePolyline + FillGradient strips instead of
+			// CPU-rasterized FillPath/StrokePath so MyGo's MaskAtlas never grows on chart frames.
+			a.ChartPtsDown = sampleMonotoneSeries(a.ChartPtsDown, &a.ChartSlopes, r, xs, ysDown, hasDown)
+			if hasDown {
+				fillChartAreaStrips(painter, r, a.ChartPtsDown, p.ChartDown, 0.16)
+			}
+			painter.StrokePolyline(a.ChartPtsDown, 2, opaqueColor(p.ChartDown))
 
-			painter.FillPath(chart.Area(r, xs, nil, ysUp, chart.CurveMonotone), p.ChartUp.Alpha(0.10))
-			painter.StrokePath(chart.Line(r, xs, ysUp, chart.CurveMonotone), 1.8, p.ChartUp)
+			a.ChartPtsUp = sampleMonotoneSeries(a.ChartPtsUp, &a.ChartSlopes, r, xs, ysUp, hasUp)
+			if hasUp {
+				fillChartAreaStrips(painter, r, a.ChartPtsUp, p.ChartUp, 0.12)
+			}
+			painter.StrokePolyline(a.ChartPtsUp, 1.8, opaqueColor(p.ChartUp))
 		})
 	}).Label(a.Tr("流量图表", "Traffic chart")).Grow(1).MinHeight(100).GapX(8).GapY(4)
 }
+
+func opaqueColor(c ui.Color) ui.Color {
+	c.A = 255
+	return c
+}
+
+// sampleMonotoneSeries maps normalized (xs, ys) into pixel coordinates inside r using
+// Steffen monotone cubic interpolation, reusing dst and slopesBuf to avoid per-frame allocations.
+func sampleMonotoneSeries(dst [][2]float32, slopesBuf *[]float32, r ui.Rect, xs, ys []float32, nonZero bool) [][2]float32 {
+	n := len(xs)
+	if n < 2 || r.W <= 0 || r.H <= 0 {
+		return dst[:0]
+	}
+	bottom := r.Y + r.H
+	if !nonZero {
+		dst = dst[:0]
+		dst = append(dst,
+			[2]float32{chart.X(r, xs[0]), bottom},
+			[2]float32{chart.X(r, xs[n-1]), bottom},
+		)
+		return dst
+	}
+
+	if cap(*slopesBuf) < n {
+		*slopesBuf = make([]float32, n)
+	}
+	m := (*slopesBuf)[:n]
+
+	px := func(i int) float32 { return chart.X(r, xs[i]) }
+	py := func(i int) float32 { return chart.Y(r, ys[i]) }
+
+	if n >= 3 {
+		for i := 1; i < n-1; i++ {
+			m[i] = steffenSlope(px(i-1), py(i-1), px(i), py(i), px(i+1), py(i+1))
+		}
+		m[0] = steffenEndSlope(px(0), py(0), px(1), py(1), m[1])
+		m[n-1] = steffenEndSlope(px(n-2), py(n-2), px(n-1), py(n-1), m[n-2])
+	} else {
+		for i := range m {
+			m[i] = 0
+		}
+	}
+
+	dst = dst[:0]
+	dst = append(dst, [2]float32{px(0), py(0)})
+	const subDivs = 3
+	for i := 1; i < n; i++ {
+		x0, y0 := px(i-1), py(i-1)
+		x1, y1 := px(i), py(i)
+		dx := x1 - x0
+		if n < 3 || dx <= 2 || (y0 == y1 && m[i-1] == 0 && m[i] == 0) {
+			dst = append(dst, [2]float32{x1, y1})
+			continue
+		}
+		// Cubic Hermite evaluation equivalent to Steffen's Bezier control points.
+		h := dx
+		m0 := m[i-1] * h
+		m1 := m[i] * h
+		for s := 1; s < subDivs; s++ {
+			t := float32(s) / float32(subDivs)
+			t2 := t * t
+			t3 := t2 * t
+			yVal := (2*t3-3*t2+1)*y0 + (t3-2*t2+t)*m0 + (-2*t3+3*t2)*y1 + (t3-t2)*m1
+			if yVal < r.Y {
+				yVal = r.Y
+			} else if yVal > bottom {
+				yVal = bottom
+			}
+			dst = append(dst, [2]float32{x0 + dx*t, yVal})
+		}
+		dst = append(dst, [2]float32{x1, y1})
+	}
+	return dst
+}
+
+func steffenSlope(x0, y0, x1, y1, x2, y2 float32) float32 {
+	h0, h1 := x1-x0, x2-x1
+	if h0 == 0 || h1 == 0 {
+		return 0
+	}
+	s0, s1 := (y1-y0)/h0, (y2-y1)/h1
+	if (s0 > 0) != (s1 > 0) || s0 == 0 || s1 == 0 {
+		return 0
+	}
+	p := (s0*h1 + s1*h0) / (h0 + h1)
+	a0, a1, ap := abs32(s0), abs32(s1), 0.5*abs32(p)
+	lim := a0
+	if a1 < lim {
+		lim = a1
+	}
+	if ap < lim {
+		lim = ap
+	}
+	if s0 < 0 {
+		return -2 * lim
+	}
+	return 2 * lim
+}
+
+func steffenEndSlope(x0, y0, x1, y1, t float32) float32 {
+	h := x1 - x0
+	if h == 0 {
+		return t
+	}
+	return (3*(y1-y0)/h - t) / 2
+}
+
+func abs32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// fillChartAreaStrips renders a soft vertical gradient beneath non-zero curve segments using
+// GPU-native FillGradient rectangles (zero MaskAtlas allocation).
+func fillChartAreaStrips(painter *ui.Painter, r ui.Rect, pts [][2]float32, col ui.Color, topAlpha float32) {
+	if len(pts) < 2 {
+		return
+	}
+	bottom := r.Y + r.H
+	grad := ui.LinearGradient{
+		From:  col.Alpha(topAlpha),
+		To:    col.Alpha(0),
+		Angle: 180,
+	}
+	for i := 1; i < len(pts); i++ {
+		x0, y0 := pts[i-1][0], pts[i-1][1]
+		x1, y1 := pts[i][0], pts[i][1]
+		w := x1 - x0
+		if w <= 0 {
+			continue
+		}
+		top := (y0 + y1) * 0.5
+		h := bottom - top
+		if h <= 0.5 {
+			continue
+		}
+		painter.FillGradient(ui.Rect{X: x0, Y: top, W: w, H: h}, grad, 0)
+	}
+}
+

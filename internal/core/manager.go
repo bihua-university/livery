@@ -37,19 +37,31 @@ type Manager struct {
 
 // NewManager creates a core supervisor defaulting to mihomo.
 func NewManager(binDir, workDir string, onState func(model.CoreInfo), onLog func(model.LogEntry)) *Manager {
+	return NewManagerWithConfig(model.CoreMihomo, "", "", binDir, workDir, onState, onLog)
+}
+
+// NewManagerWithConfig creates a core supervisor preconfigured for the target core type and paths
+// so startup probes the binary only once.
+func NewManagerWithConfig(coreType model.CoreType, customPath, geoDataDir, binDir, workDir string, onState func(model.CoreInfo), onLog func(model.LogEntry)) *Manager {
+	ct := model.NormalizeCoreType(coreType)
+	geo := strings.TrimSpace(geoDataDir)
+	if geo != "" {
+		geo = filepath.Clean(geo)
+	}
 	m := &Manager{
-		coreType: model.CoreMihomo,
-		binDir:   binDir,
-		workDir:  workDir,
-		onState:  onState,
-		onLog:    onLog,
+		coreType:   ct,
+		binDir:     binDir,
+		workDir:    workDir,
+		geoDataDir: geo,
+		onState:    onState,
+		onLog:      onLog,
 		info: model.CoreInfo{
-			CoreType:   model.CoreMihomo,
+			CoreType:   ct,
 			Status:     model.CoreStopped,
 			IsElevated: IsElevated(),
 		},
 	}
-	m.RefreshBinaryInfo("")
+	m.RefreshBinaryInfo(customPath)
 	return m
 }
 

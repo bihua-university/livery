@@ -23,6 +23,9 @@ func Rules(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				Placeholder(a.Tr("搜索规则类型、内容或出站...", "Search rule type, pattern, or outbound...")).
 				Width(280)
 			ui.Spacer(c)
+			if components.IconActionButton(c, p, icons.Refresh, a.Tr("刷新规则", "Refresh Rules")).Disabled(a.RulesLoading).Clicked() {
+				a.RefreshRulesNow()
+			}
 			if components.PrimaryActionButton(c, p, s, icons.Plus, a.Tr("添加自定义规则", "Add Custom Rule")).Clicked() {
 				a.DraftRuleType = "domain_suffix"
 				a.DraftRulePat = ""
@@ -77,11 +80,22 @@ func Rules(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 
 		filtered := filteredRules(a)
 		ui.Column(c).Grow(1).MinHeight(0).Background(p.Card).Border(1, p.CardBorder).Radius(theme.RadiusXL).Clip().Children(func() {
-			ui.Row(c).Padding(10, 14).Background(p.PopoverHead).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).AlignItems(ui.Center).Children(func() {
+			ui.Row(c).Padding(10, 14).Gap(8).Background(p.PopoverHead).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, a.Tr("生效路由规则", "Active Routing Rules")).FontSize(s.SM).FontWeight(600).TextColor(p.Foreground).Grow(1)
-				ui.Text(c, fmt.Sprintf("%d %s", len(filtered), a.Tr("条", "rules"))).
-					FontSize(s.XS).Font(theme.MonoFont()).FontFeatures("tnum").TextColor(p.ForegroundSubtle)
+				if a.RulesLoading && a.IsRulesLoaded() {
+					ui.Spinner(c).FontSize(13).TextColor(p.Primary).Label(a.Tr("正在刷新规则", "Refreshing rules"))
+				}
+				if a.IsRulesLoaded() {
+					ui.Text(c, fmt.Sprintf("%d %s", len(filtered), a.Tr("条", "rules"))).
+						FontSize(s.XS).Font(theme.MonoFont()).FontFeatures("tnum").TextColor(p.ForegroundSubtle)
+				}
 			})
+			if a.RulesLoading && !a.IsRulesLoaded() {
+				components.LoadingState(c, p, s,
+					a.Tr("正在加载分流规则...", "Loading routing rules..."),
+					a.Tr("按需读取当前配置与核心生效规则", "Loading active profile and core rules on demand"))
+				return
+			}
 			if len(filtered) == 0 {
 				components.EmptyState(c, p, s, icons.Rules, a.Tr("暂无匹配规则", "No matching rules"), "", nil)
 				return

@@ -23,6 +23,7 @@ var (
 	memCloseHandle               = memKernel32.NewProc("CloseHandle")
 	memQueryFullProcessImageName = memKernel32.NewProc("QueryFullProcessImageNameW")
 	memK32GetProcessMem          = memKernel32.NewProc("K32GetProcessMemoryInfo")
+	memSetWorkingSetSizeEx       = memKernel32.NewProc("SetProcessWorkingSetSizeEx")
 	memIphlpapi                  = syscall.NewLazyDLL("iphlpapi.dll")
 	memGetExtendedTcpTable       = memIphlpapi.NewProc("GetExtendedTcpTable")
 )
@@ -118,3 +119,13 @@ func processExeBaseName(pid int) string {
 	}
 	return filepath.Base(syscall.UTF16ToString(buf[:size]))
 }
+
+func trimProcessMemory() {
+	proc, _, _ := memGetCurrentProcess.Call()
+	if proc == 0 || memSetWorkingSetSizeEx.Find() != nil {
+		return
+	}
+	allOnes := ^uintptr(0)
+	_, _, _ = memSetWorkingSetSizeEx.Call(proc, allOnes, allOnes, 0)
+}
+

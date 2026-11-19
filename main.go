@@ -22,6 +22,14 @@ import (
 	appui "github.com/bihua-university/livery/internal/ui"
 )
 
+func init() {
+	// Disable Go's default 512 KiB heap profiling buckets (~1.4 MiB resident overhead)
+	// unless explicitly requested for diagnostics.
+	if strings.TrimSpace(os.Getenv("LIVERY_PPROF")) == "" {
+		runtime.MemProfileRate = 0
+	}
+}
+
 func main() {
 	debug.SetGCPercent(25)
 
@@ -47,8 +55,9 @@ func main() {
 		log.Fatalf("init profile manager: %v", err)
 	}
 
+	s0 := pm.Settings()
 	var controller *app.App
-	cm := core.NewManager(pm.BinDir(), pm.DataDir(),
+	cm := core.NewManagerWithConfig(s0.CoreType, s0.ActiveCorePath(), s0.GeoDataDir, pm.BinDir(), pm.DataDir(),
 		func(info model.CoreInfo) {
 			if controller != nil {
 				controller.OnCoreState(info)
@@ -61,9 +70,7 @@ func main() {
 		},
 	)
 	controller = app.New(pm, cm)
-	s0 := pm.Settings()
-	cm.SetGeoDataDir(s0.GeoDataDir)
-	cm.SetCoreType(s0.CoreType, s0.ActiveCorePath())
+	controller.SetMainRunner(mygo.RunOnMain)
 
 	if s0.Language == model.LangEN {
 		mygo.App.SetLocale("en")
@@ -109,11 +116,11 @@ func main() {
 
 	var mainWin *mygo.Window
 	var quitting bool
+	var hideToTray bool
 
 	showWindow := func() {
 		if mainWin == nil || mainWin.IsDestroyed() {
-			s := controller.Settings()
-			mainWin = mygo.NewWindow(mygo.WindowOptions{
+			w := mygo.NewWindow(mygo.WindowOptions{
 				Title:             "Livery",
 				Width:             1120,
 				Height:            740,
@@ -124,15 +131,19 @@ func main() {
 				TitleBarHeight:    44,
 				HideWindowButtons: runtime.GOOS != "darwin",
 				StateKey:          "main",
-				Hidden:            s.SilentStart,
+				Hidden:            false,
 				Content:           ui.View(renderView),
 			})
-			controller.SetWindow(mainWin)
-			mainWin.OnClose(func(e *mygo.CloseEvent) {
-				if !quitting && controller.Settings().CloseAction == model.CloseToTray {
-					e.PreventDefault()
-					mainWin.Hide()
+			mainWin = w
+			controller.SetWindow(w)
+			// Allowing the window to close (instead of PreventDefault + Hide) lets MyGo detach
+			// the UI renderer and release the shared D3D11 device + atlases while running in tray.
+			// Window bounds are preserved automatically via StateKey: "main".
+			w.OnClosed(func() {
+				if mainWin == w {
+					mainWin = nil
 				}
+				controller.OnWindowClosed()
 			})
 		}
 		mainWin.Show()
@@ -149,8 +160,9 @@ func main() {
 		}
 	})
 	mygo.App.OnWindowAllClosed(func() {
-		// Keep running in system tray when main window is hidden/closed.
-		if automationMode {
+		shouldHide := hideToTray
+		hideToTray = false
+		if automationMode || quitting || (!shouldHide && controller.Settings().CloseAction == model.CloseQuit) {
 			mygo.App.Quit()
 		}
 	})
@@ -167,27 +179,8 @@ func main() {
 		if !s.SilentStart {
 			showWindow()
 		} else {
-			mainWin = mygo.NewWindow(mygo.WindowOptions{
-				Title:             "Livery",
-				Width:             1120,
-				Height:            740,
-				MinWidth:          780,
-				MinHeight:         540,
-				BackgroundColor:   "light-dark(#ececee, #2b2b2b)",
-				TitleBarStyle:     mygo.TitleBarHidden,
-				TitleBarHeight:    44,
-				HideWindowButtons: runtime.GOOS != "darwin",
-				StateKey:          "main",
-				Hidden:            true,
-				Content:           ui.View(renderView),
-			})
-			controller.SetWindow(mainWin)
-			mainWin.OnClose(func(e *mygo.CloseEvent) {
-				if !quitting && controller.Settings().CloseAction == model.CloseToTray {
-					e.PreventDefault()
-					mainWin.Hide()
-				}
-			})
+			// Defer window and GPU renderer creation until the user opens Livery from the tray.
+			controller.SetWindowHidden(true)
 		}
 
 		if !automationMode {
@@ -202,7 +195,7 @@ func main() {
 					refreshTrayMenu(tray, controller, showWindow)
 				})
 				tray.OnClick(func() {
-					if mainWin != nil && mainWin.IsVisible() {
+					if mainWin != nil && !mainWin.IsDestroyed() && mainWin.IsVisible() {
 						mainWin.Focus()
 					} else {
 						showWindow()
@@ -246,8 +239,9 @@ func main() {
 
 		if !automationMode {
 			_ = mygo.GlobalShortcut.Register("CmdOrCtrl+Shift+M", func() {
-				if mainWin != nil && mainWin.IsVisible() {
-					mainWin.Hide()
+				if mainWin != nil && !mainWin.IsDestroyed() && mainWin.IsVisible() {
+					hideToTray = true
+					mainWin.Close()
 				} else {
 					showWindow()
 				}
@@ -275,7 +269,10 @@ func setupTray(controller *app.App, showWindow func()) (*mygo.Tray, error) {
 	if err != nil {
 		return nil, err
 	}
-	refreshTrayMenu(tray, controller, showWindow)
+	// Sync icon only if the tray taskbar uses a light theme (initial icon assumed dark=true).
+	if !tray.Dark() {
+		_ = tray.SetIcon(icons.TrayPNG(info.Status == model.CoreRunning, s.SystemProxyEnabled, s.TUNEnabled, false), false)
+	}
 	return tray, nil
 }
 

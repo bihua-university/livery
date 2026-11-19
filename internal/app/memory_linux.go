@@ -80,3 +80,6 @@ func findCoreListenerPID(port int, configuredPath string) int {
 	}
 	return 0
 }
+
+func trimProcessMemory() {}
+

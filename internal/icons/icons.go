@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"sync"
 
 	"github.com/egoist/mygo/ui"
 )
@@ -52,12 +53,14 @@ var (
 	Layers      = lucide(`<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>`)
 )
 
+var (
+	trayPNGMu    sync.Mutex
+	trayPNGCache = make(map[color.NRGBA][]byte, 5)
+	trayEncoder  = png.Encoder{CompressionLevel: png.NoCompression}
+)
+
 // TrayPNG generates a crisp 32x32 PNG tray icon featuring the Livery aircraft tailfin mark.
 func TrayPNG(running, sysProxy, tun, darkTaskbar bool) []byte {
-	const size = 32
-	const samples = 4
-	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-
 	finColor := color.NRGBA{R: 115, G: 115, B: 115, A: 255}
 	if darkTaskbar {
 		finColor = color.NRGBA{R: 220, G: 224, B: 230, A: 255}
@@ -70,6 +73,17 @@ func TrayPNG(running, sysProxy, tun, darkTaskbar bool) []byte {
 			finColor = color.NRGBA{R: 70, G: 191, B: 114, A: 255}
 		}
 	}
+
+	trayPNGMu.Lock()
+	if cached, ok := trayPNGCache[finColor]; ok {
+		trayPNGMu.Unlock()
+		return cached
+	}
+	trayPNGMu.Unlock()
+
+	const size = 32
+	const samples = 4
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 
 	for y := range size {
 		for x := range size {
@@ -103,8 +117,14 @@ func TrayPNG(running, sysProxy, tun, darkTaskbar bool) []byte {
 		}
 	}
 	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
-	return buf.Bytes()
+	buf.Grow(size*size*4 + 256)
+	_ = trayEncoder.Encode(&buf, img)
+	out := buf.Bytes()
+
+	trayPNGMu.Lock()
+	trayPNGCache[finColor] = out
+	trayPNGMu.Unlock()
+	return out
 }
 
 // AppIconPNG generates a 256x256 PNG application icon for resources/icon.png

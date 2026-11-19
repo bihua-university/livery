@@ -34,6 +34,10 @@ func Logs(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 
 			ui.Spacer(c)
 
+			if a.LogsLoading && a.IsLogsLoaded() {
+				ui.Spinner(c).FontSize(13).TextColor(p.Primary).Label(a.Tr("正在刷新日志", "Refreshing logs"))
+			}
+
 			autoBtn := components.ActionButton(c, p, s, nil, a.Tr("自动滚动", "Auto-scroll"))
 			if a.LogAutoScroll {
 				autoBtn.Background(p.Selected).BorderColor(p.Primary)
@@ -67,6 +71,12 @@ func Logs(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 		entries := a.Logs
 
 		ui.Column(c).Grow(1).MinHeight(0).Background(p.Card).Border(1, p.CardBorder).Radius(theme.RadiusXL).Clip().Children(func() {
+			if a.LogsLoading && !a.IsLogsLoaded() {
+				components.LoadingState(c, p, s,
+					a.Tr("正在加载运行日志...", "Loading logs..."),
+					a.Tr("按需从本地日志文件中读取最近记录", "Reading recent entries from local log file on demand"))
+				return
+			}
 			if len(entries) == 0 {
 				components.EmptyState(c, p, s, icons.Logs, a.Tr("暂无日志输出", "No log entries"), "", nil)
 				return

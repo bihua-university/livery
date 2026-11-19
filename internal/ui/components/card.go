@@ -88,3 +88,15 @@ func EmptyState(c *ui.Context, p theme.Palette, s theme.TypeScale, icon *ui.SVG,
 		}
 	})
 }
+
+// LoadingState renders a centered animated spinner with loading copy.
+func LoadingState(c *ui.Context, p theme.Palette, s theme.TypeScale, title, subtitle string) {
+	ui.Column(c).Grow(1).Fill().Center().Gap(10).Children(func() {
+		ui.Spinner(c).FontSize(22).TextColor(p.Primary).Label(title)
+		ui.Text(c, title).FontSize(s.Base).FontWeight(600).TextColor(p.Foreground)
+		if subtitle != "" {
+			ui.Text(c, subtitle).FontSize(s.SM).TextColor(p.ForegroundSubtle)
+		}
+	})
+}
+

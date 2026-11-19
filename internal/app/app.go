@@ -76,6 +76,9 @@ type App struct {
 	ChartXs        []float32
 	ChartYsDown    []float32
 	ChartYsUp      []float32
+	ChartPtsDown   [][2]float32
+	ChartPtsUp     [][2]float32
+	ChartSlopes    []float32
 
 	Groups          []model.ProxyGroup
 	Nodes           map[string]model.ProxyNode
@@ -97,31 +100,37 @@ type App struct {
 	seenConnByID   map[string]model.Connection
 	connActiveSet  map[string]struct{}
 
-	// Rules state (lazily loaded only while Page == PageRules; released on navigate away or hide)
+	// Rules state (lazily loaded asynchronously only while Page == PageRules; released on navigate away or hide)
 	Rules            []model.RuleEntry
 	RuleSearch       string
 	RuleListState    ui.ListState
+	RulesLoading     bool
 	hasLoadedRules   bool
 	rulesCoreSynced  bool
-	rulesCoreSyncing bool
 	rulesSyncRetryAt time.Time
+	rulesLoadGen     uint64
 	ShowRuleModal    bool
 	DraftRuleType    string
 	DraftRulePat     string
 	DraftRuleOut     string
 	DraftRulePrep    bool
 
-	// Logs state (disk-backed via LogStore; Logs slice is populated only while Page == PageLogs)
-	Logs            []model.LogEntry
-	LogLevelIdx     int // 0=All, 1=Info, 2=Warn, 3=Error, 4=Debug
-	LogSearch       string
-	LogPaused       bool
-	LogAutoScroll   bool
-	LogListState    ui.ListState
-	loadedLogRev    uint64
-	loadedLogLevel  int
-	loadedLogSearch string
-	hasLoadedLogs   bool
+	// Logs state (disk-backed via LogStore; loaded asynchronously only while Page == PageLogs)
+	Logs             []model.LogEntry
+	LogLevelIdx      int // 0=All, 1=Info, 2=Warn, 3=Error, 4=Debug
+	LogSearch        string
+	LogPaused        bool
+	LogAutoScroll    bool
+	LogListState     ui.ListState
+	LogsLoading      bool
+	loadedLogRev     uint64
+	loadedLogLevel   int
+	loadedLogSearch  string
+	pendingLogRev    uint64
+	pendingLogLevel  int
+	pendingLogSearch string
+	hasLoadedLogs    bool
+	logsLoadGen      uint64
 
 	// Profiles UI & Modals
 	ShowImportModal     bool
@@ -185,6 +194,7 @@ type App struct {
 	streamCancel      context.CancelFunc
 	syncWakeCh        chan struct{}
 	freeMemPending    atomic.Bool
+	trimMemPending    atomic.Bool
 	hiddenTraffic     [maxTrafficSamples]model.TrafficSample
 	hiddenTrafficHead int
 	hiddenTrafficLen  int
@@ -195,6 +205,11 @@ type App struct {
 	hasHiddenTraffic  bool
 	streamedCoreMem   atomic.Int64
 	overviewVisible   atomic.Bool
+
+	mainRunner       func(func())
+	mainQueueMu      sync.Mutex
+	mainQueue        []func()
+	mainQueueRunning bool
 }
 
 // New constructs the application controller.
@@ -321,6 +336,12 @@ func (a *App) SetWindow(w *mygo.Window) {
 	a.win = w
 }
 
+// SetMainRunner registers the host main-thread executor (typically mygo.RunOnMain)
+// used to serialize async state mutations when no UI window is open (e.g. silent start or tray mode).
+func (a *App) SetMainRunner(fn func(func())) {
+	a.mainRunner = fn
+}
+
 // Window returns the attached MyGo window, if any.
 func (a *App) Window() *mygo.Window {
 	return a.win
@@ -331,13 +352,48 @@ func (a *App) SetTrayRefresh(fn func()) {
 	a.onTrayRefresh = fn
 }
 
-// UpdateUI executes fn on the window's main thread and requests a frame redraw.
+// UpdateUI executes fn on the window's main thread and requests a frame redraw when a window is open.
 func (a *App) UpdateUI(fn func()) {
 	if a.win != nil && !a.win.IsDestroyed() {
 		a.win.Update(fn)
 		return
 	}
+	if a.mainRunner != nil {
+		a.dispatchMainAsync(fn)
+		return
+	}
 	fn()
+}
+
+func (a *App) dispatchMainAsync(fn func()) {
+	a.mainQueueMu.Lock()
+	a.mainQueue = append(a.mainQueue, fn)
+	start := !a.mainQueueRunning
+	if start {
+		a.mainQueueRunning = true
+	}
+	a.mainQueueMu.Unlock()
+	if !start {
+		return
+	}
+	go func() {
+		for {
+			a.mainQueueMu.Lock()
+			if len(a.mainQueue) == 0 {
+				a.mainQueueRunning = false
+				a.mainQueueMu.Unlock()
+				return
+			}
+			batch := a.mainQueue
+			a.mainQueue = nil
+			a.mainQueueMu.Unlock()
+			a.mainRunner(func() {
+				for _, f := range batch {
+					f()
+				}
+			})
+		}
+	}()
 }
 
 // Notify queues a toast message for the next UI frame.
@@ -350,15 +406,11 @@ func (a *App) RefreshTray() {
 	if a.onTrayRefresh == nil {
 		return
 	}
-	if a.win != nil && !a.win.IsDestroyed() {
-		a.win.Update(func() {
-			if a.onTrayRefresh != nil {
-				a.onTrayRefresh()
-			}
-		})
-		return
-	}
-	mygo.RunOnMain(a.onTrayRefresh)
+	a.UpdateUI(func() {
+		if a.onTrayRefresh != nil {
+			a.onTrayRefresh()
+		}
+	})
 }
 
 // IsCoreBusy reports whether a core start or restart operation is currently in flight.
@@ -468,20 +520,27 @@ func (a *App) OnLog(entry model.LogEntry) {
 	}
 }
 
-// SyncLogsForView lazily loads only the matching tail window from disk while the Logs page is open.
+// SyncLogsForView lazily loads only the matching tail window from disk off the UI thread while the Logs page is open.
 func (a *App) SyncLogsForView() {
-	if a.LogStore == nil {
+	if a.LogStore == nil || a.Page != PageLogs || a.WindowHidden.Load() {
 		return
 	}
 	rev := a.LogStore.Revision()
-	if a.hasLoadedLogs && a.loadedLogRev == rev && a.loadedLogLevel == a.LogLevelIdx && a.loadedLogSearch == a.LogSearch {
+	lvl := a.LogLevelIdx
+	search := a.LogSearch
+
+	if a.hasLoadedLogs && a.loadedLogRev == rev && a.loadedLogLevel == lvl && a.loadedLogSearch == search {
 		return
 	}
-	if a.LogPaused && a.hasLoadedLogs && a.loadedLogLevel == a.LogLevelIdx && a.loadedLogSearch == a.LogSearch {
+	if a.LogPaused && a.hasLoadedLogs && a.loadedLogLevel == lvl && a.loadedLogSearch == search {
 		return
 	}
+	if a.LogsLoading && a.pendingLogRev == rev && a.pendingLogLevel == lvl && a.pendingLogSearch == search {
+		return
+	}
+
 	wantLevel := ""
-	switch a.LogLevelIdx {
+	switch lvl {
 	case 1:
 		wantLevel = "info"
 	case 2:
@@ -491,32 +550,92 @@ func (a *App) SyncLogsForView() {
 	case 4:
 		wantLevel = "debug"
 	}
-	entries, err := a.LogStore.Tail(maxVisibleLogs, wantLevel, a.LogSearch)
-	if err == nil {
-		a.Logs = entries
-		a.loadedLogRev = rev
-		a.loadedLogLevel = a.LogLevelIdx
-		a.loadedLogSearch = a.LogSearch
-		a.hasLoadedLogs = true
-	}
+
+	a.logsLoadGen++
+	gen := a.logsLoadGen
+	a.LogsLoading = true
+	a.pendingLogRev = rev
+	a.pendingLogLevel = lvl
+	a.pendingLogSearch = search
+	store := a.LogStore
+
+	go func() {
+		entries, err := store.Tail(maxVisibleLogs, wantLevel, search)
+		a.UpdateUI(func() {
+			if gen != a.logsLoadGen {
+				return
+			}
+			a.LogsLoading = false
+			if a.Page != PageLogs || a.WindowHidden.Load() {
+				return
+			}
+			if err == nil {
+				a.Logs = entries
+				a.loadedLogRev = rev
+				a.loadedLogLevel = lvl
+				a.loadedLogSearch = search
+				a.hasLoadedLogs = true
+			}
+		})
+	}()
 }
 
 // ReleaseLogsView drops the in-memory log slice when navigating away or hiding the window.
 func (a *App) ReleaseLogsView() {
-	if a.Logs != nil || a.hasLoadedLogs {
+	hadLogs := len(a.Logs) > 0
+	if a.Logs != nil || a.hasLoadedLogs || a.LogsLoading {
+		a.logsLoadGen++
 		a.Logs = nil
 		a.hasLoadedLogs = false
+		a.LogsLoading = false
+		a.LogListState = ui.ListState{}
+		if hadLogs {
+			a.FreeOSMemoryAsync()
+		}
 	}
 }
 
 // ReleaseEditorState drops the code editor buffer and syntax state when the editor modal closes.
 func (a *App) ReleaseEditorState() {
-	if a.EditorState != nil || a.EditorError != "" || a.EditingProfileID != "" || a.EditorTitle != "" {
+	hadEditor := a.EditorState != nil
+	if hadEditor || a.EditorError != "" || a.EditingProfileID != "" || a.EditorTitle != "" {
 		a.EditorState = nil
 		a.EditorError = ""
 		a.EditingProfileID = ""
 		a.EditorTitle = ""
+		if hadEditor {
+			a.FreeOSMemoryAsync()
+		}
 	}
+}
+
+// SetWindowHidden updates the hidden flag before a window is created (e.g. silent start).
+func (a *App) SetWindowHidden(hidden bool) {
+	a.WindowHidden.Store(hidden)
+	if hidden {
+		a.SetOverviewVisible(false)
+	}
+}
+
+// OnWindowClosed detaches the closed window, drops transient UI data, and trims unused OS memory.
+func (a *App) OnWindowClosed() {
+	a.win = nil
+	a.WindowHidden.Store(true)
+	a.SetOverviewVisible(false)
+	a.ReleaseLogsView()
+	a.ReleaseRulesView()
+	a.ReleaseEditorState()
+	a.Groups = nil
+	a.Nodes = nil
+	a.Conns = nil
+	a.ClosedConns = nil
+	a.seenConnByID = nil
+	a.connActiveSet = nil
+	a.ShowConnModal = false
+	a.ChartPtsDown = nil
+	a.ChartPtsUp = nil
+	a.ChartSlopes = nil
+	a.FreeOSMemoryAndTrimAsync()
 }
 
 // ReleaseHiddenData drops transient proxy and connection state when hidden to tray and returns freed memory to OS.
@@ -528,11 +647,23 @@ func (a *App) ReleaseHiddenData() {
 	a.seenConnByID = nil
 	a.connActiveSet = nil
 	a.ShowConnModal = false
-	a.FreeOSMemoryAsync()
+	a.FreeOSMemoryAndTrimAsync()
 }
 
 // FreeOSMemoryAsync runs GC and scavenges unused heap memory back to the OS asynchronously.
 func (a *App) FreeOSMemoryAsync() {
+	a.freeOSMemoryAsync(false)
+}
+
+// FreeOSMemoryAndTrimAsync runs GC, scavenges unused heap memory, and trims OS working set pages (used when hidden/closed to tray).
+func (a *App) FreeOSMemoryAndTrimAsync() {
+	a.freeOSMemoryAsync(true)
+}
+
+func (a *App) freeOSMemoryAsync(trim bool) {
+	if trim {
+		a.trimMemPending.Store(true)
+	}
 	if !a.freeMemPending.CompareAndSwap(false, true) {
 		return
 	}
@@ -540,6 +671,13 @@ func (a *App) FreeOSMemoryAsync() {
 		defer a.freeMemPending.Store(false)
 		runtime.GC()
 		debug.FreeOSMemory()
+		if a.trimMemPending.Swap(false) {
+			// Allow native renderer teardown (e.g. D3D11 device release) to settle before trimming cold working set pages.
+			time.Sleep(150 * time.Millisecond)
+			runtime.GC()
+			debug.FreeOSMemory()
+			trimProcessMemory()
+		}
 	}()
 }
 
@@ -585,41 +723,99 @@ func (a *App) RefreshAppMemoryAsync() {
 	}()
 }
 
-// SyncRulesForView lazily loads routing rules only while the Rules page is open.
+// IsRulesLoaded reports whether the Rules tab has finished at least one load since entering.
+func (a *App) IsRulesLoaded() bool { return a.hasLoadedRules }
+
+// IsLogsLoaded reports whether the Logs tab has finished at least one load since entering.
+func (a *App) IsLogsLoaded() bool { return a.hasLoadedLogs }
+
+// RefreshRulesNow forces an asynchronous reload of routing rules while on the Rules tab.
+func (a *App) RefreshRulesNow() {
+	if a.Page != PageRules || a.WindowHidden.Load() {
+		return
+	}
+	a.rulesCoreSynced = false
+	a.rulesSyncRetryAt = time.Time{}
+	a.startRulesLoadLocked(true)
+}
+
+// SyncRulesForView lazily loads routing rules asynchronously only while the Rules page is open.
 func (a *App) SyncRulesForView() {
+	if a.Page != PageRules || a.WindowHidden.Load() {
+		return
+	}
+	if a.RulesLoading {
+		return
+	}
 	if !a.hasLoadedRules {
-		a.Rules = a.PM.ActiveRules()
-		a.hasLoadedRules = true
+		a.startRulesLoadLocked(false)
+		return
 	}
-	if a.CoreInfo.Status == model.CoreRunning && !a.rulesCoreSynced && !a.rulesCoreSyncing && time.Now().After(a.rulesSyncRetryAt) {
-		a.rulesCoreSyncing = true
-		go func() {
-			rules, err := a.APIClient().GetRules(context.Background())
-			a.UpdateUI(func() {
-				a.rulesCoreSyncing = false
-				if err == nil && len(rules) > 0 {
-					a.rulesCoreSynced = true
-					a.rulesSyncRetryAt = time.Time{}
-					if a.Page == PageRules && !a.WindowHidden.Load() {
-						a.Rules = rules
-						a.hasLoadedRules = true
-					}
-					return
-				}
+	if a.CoreInfo.Status == model.CoreRunning && !a.rulesCoreSynced && time.Now().After(a.rulesSyncRetryAt) {
+		a.startRulesLoadLocked(false)
+	}
+}
+
+func (a *App) startRulesLoadLocked(force bool) {
+	if a.RulesLoading && !force {
+		return
+	}
+	a.rulesLoadGen++
+	gen := a.rulesLoadGen
+	a.RulesLoading = true
+	coreRunning := a.CoreInfo.Status == model.CoreRunning
+	client := a.APIClient()
+
+	go func() {
+		var rules []model.RuleEntry
+		syncedFromCore := false
+		if coreRunning {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			live, err := client.GetRules(ctx)
+			cancel()
+			if err == nil && len(live) > 0 {
+				rules = live
+				syncedFromCore = true
+			}
+		}
+		if len(rules) == 0 {
+			rules = a.PM.ActiveRules()
+		}
+
+		a.UpdateUI(func() {
+			if gen != a.rulesLoadGen {
+				return
+			}
+			a.RulesLoading = false
+			if a.Page != PageRules || a.WindowHidden.Load() {
+				return
+			}
+			a.Rules = rules
+			a.hasLoadedRules = true
+			if syncedFromCore {
+				a.rulesCoreSynced = true
+				a.rulesSyncRetryAt = time.Time{}
+			} else if coreRunning {
 				a.rulesSyncRetryAt = time.Now().Add(5 * time.Second)
-			})
-		}()
-	}
+			}
+		})
+	}()
 }
 
 // ReleaseRulesView drops the in-memory rules slice when navigating away or hiding the window.
 func (a *App) ReleaseRulesView() {
-	if a.Rules != nil || a.hasLoadedRules || a.rulesCoreSynced || !a.rulesSyncRetryAt.IsZero() {
+	hadRules := len(a.Rules) > 0
+	if a.Rules != nil || a.hasLoadedRules || a.RulesLoading || a.rulesCoreSynced || !a.rulesSyncRetryAt.IsZero() {
+		a.rulesLoadGen++
 		a.Rules = nil
 		a.hasLoadedRules = false
+		a.RulesLoading = false
 		a.rulesCoreSynced = false
 		a.rulesSyncRetryAt = time.Time{}
 		a.RuleListState = ui.ListState{}
+		if hadRules {
+			a.FreeOSMemoryAsync()
+		}
 	}
 }
 
@@ -628,7 +824,9 @@ func (a *App) ClearLogs() {
 	if a.LogStore != nil {
 		_ = a.LogStore.Clear()
 	}
+	a.logsLoadGen++
 	a.Logs = nil
+	a.LogsLoading = false
 	a.hasLoadedLogs = false
 }
 
@@ -715,13 +913,25 @@ func (a *App) StartBackground(ctx context.Context) {
 		}
 	}()
 	go func() {
-		memTicker := time.NewTicker(2 * time.Second)
+		// Return transient startup allocations (SVG parsing, config loading, first frame) to the OS once settled.
+		startupScavenge := time.NewTimer(2500 * time.Millisecond)
+		defer startupScavenge.Stop()
+		// Poll slower than MyGo's 2s frameIdle so idle shaping/frame caches can release cleanly.
+		memTicker := time.NewTicker(5 * time.Second)
 		defer memTicker.Stop()
 		var lastMem int64
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-startupScavenge.C:
+				if !a.shuttingDown.Load() {
+					if a.WindowHidden.Load() {
+						a.FreeOSMemoryAndTrimAsync()
+					} else {
+						a.FreeOSMemoryAsync()
+					}
+				}
 			case <-memTicker.C:
 				if a.shuttingDown.Load() || a.WindowHidden.Load() || !a.overviewVisible.Load() {
 					continue
@@ -730,7 +940,11 @@ func (a *App) StartBackground(ctx context.Context) {
 					continue
 				}
 				appMem := sampleAppMemory()
-				if appMem == lastMem {
+				diff := appMem - lastMem
+				if diff < 0 {
+					diff = -diff
+				}
+				if lastMem > 0 && diff < 64*1024 {
 					continue
 				}
 				lastMem = appMem
@@ -934,7 +1148,7 @@ func (a *App) startStreams() {
 		}
 	}()
 
-	// Periodic snapshot sync (/proxies, /connections, /rules)
+	// Periodic snapshot sync (/proxies, /connections); Rules are loaded strictly on-demand when opening the Rules tab.
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -942,7 +1156,7 @@ func (a *App) startStreams() {
 		case <-time.After(350 * time.Millisecond):
 		}
 
-		syncOnce := func(includeProxies, includeRules bool) {
+		syncOnce := func(includeProxies bool) {
 			if a.WindowHidden.Load() {
 				return
 			}
@@ -982,20 +1196,9 @@ func (a *App) startStreams() {
 					})
 				}
 			}
-			if includeRules && a.Page == PageRules {
-				if rules, err := client.GetRules(ctx); err == nil && len(rules) > 0 {
-					a.UpdateUI(func() {
-						if a.Page == PageRules && !a.WindowHidden.Load() {
-							a.Rules = rules
-							a.hasLoadedRules = true
-							a.rulesCoreSynced = true
-						}
-					})
-				}
-			}
 		}
 
-		syncOnce(a.Page == PageProxies || a.Page == PageOverview, a.Page == PageRules)
+		syncOnce(a.Page == PageProxies || a.Page == PageOverview)
 		ticker := time.NewTicker(1500 * time.Millisecond)
 		defer ticker.Stop()
 		ticks := 0
@@ -1007,7 +1210,7 @@ func (a *App) startStreams() {
 			case <-a.syncWakeCh:
 				if !a.WindowHidden.Load() {
 					includeProxies := a.Page == PageProxies || a.Page == PageOverview
-					syncOnce(includeProxies, a.Page == PageRules)
+					syncOnce(includeProxies)
 				}
 			case <-ticker.C:
 				ticks++
@@ -1029,8 +1232,7 @@ func (a *App) startStreams() {
 					continue
 				}
 				includeProxies := a.Page == PageProxies || a.Page == PageOverview
-				includeRules := a.Page == PageRules && ticks%10 == 0
-				syncOnce(includeProxies, includeRules)
+				syncOnce(includeProxies)
 			}
 		}
 	}()
@@ -1478,16 +1680,15 @@ func (a *App) TestGroupDelay(groupName string) {
 	}()
 }
 
-// ReloadRulesFromActiveProfile invalidates cached rules and refreshes them immediately only while viewing the Rules page.
+// ReloadRulesFromActiveProfile invalidates cached rules and refreshes them asynchronously only while viewing the Rules page.
 func (a *App) ReloadRulesFromActiveProfile() {
 	a.rulesCoreSynced = false
+	a.rulesSyncRetryAt = time.Time{}
 	if a.Page != PageRules || a.WindowHidden.Load() {
-		a.Rules = nil
-		a.hasLoadedRules = false
+		a.ReleaseRulesView()
 		return
 	}
-	a.Rules = a.PM.ActiveRules()
-	a.hasLoadedRules = true
+	a.startRulesLoadLocked(true)
 }
 
 // SetGroups replaces and pre-sorts the active proxy groups slice.

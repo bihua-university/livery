@@ -20,6 +20,15 @@ func TestIconsAndPNGGeneration(t *testing.T) {
 		t.Fatalf("expected 32x32 TrayPNG, got %dx%d", cfg.Width, cfg.Height)
 	}
 
+	tray2 := TrayPNG(true, true, false, true)
+	if len(tray) == 0 || &tray[0] != &tray2[0] {
+		t.Fatal("expected TrayPNG to return cached slice for identical visual state")
+	}
+	trayStopped := TrayPNG(false, false, false, true)
+	if bytes.Equal(tray, trayStopped) {
+		t.Fatal("expected distinct TrayPNG bytes for stopped vs running state")
+	}
+
 	appIcon := AppIconPNG()
 	appCfg, err := png.DecodeConfig(bytes.NewReader(appIcon))
 	if err != nil {

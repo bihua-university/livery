@@ -9,3 +9,6 @@ func sampleProcessPrivateMemory(int) int64 {
 func findCoreListenerPID(int, string) int {
 	return 0
 }
+
+func trimProcessMemory() {}
+
