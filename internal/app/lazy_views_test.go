@@ -117,3 +117,47 @@ func TestRulesAndLogsStrictOnDemandLoading(t *testing.T) {
 		t.Fatal("expected ReleaseLogsView to clear Logs and reset loaded/loading flags")
 	}
 }
+
+func TestStreamsPauseWhenHiddenAndResumeOnShow(t *testing.T) {
+	dir := t.TempDir()
+	pm, err := profile.NewManager(dir)
+	if err != nil {
+		t.Fatalf("profile.NewManager: %v", err)
+	}
+	cm := core.NewManager(dir, dir, nil, nil)
+	a := New(pm, cm)
+	t.Cleanup(func() {
+		a.Shutdown()
+	})
+	a.SetMainRunner(func(fn func()) { fn() })
+
+	// Core running while hidden must NOT start UI telemetry streams.
+	a.SetWindowHidden(true)
+	cm.AttachExternal("1.19.3", "127.0.0.1:19099")
+	a.OnCoreState(cm.Info())
+	a.bgMu.Lock()
+	runningWhileHidden := a.streamCancel != nil
+	a.bgMu.Unlock()
+	if runningWhileHidden {
+		t.Fatal("expected telemetry streams to stay stopped while window is hidden")
+	}
+
+	// Showing the window resumes streams.
+	a.WindowHidden.Store(false)
+	a.OnWindowShown()
+	a.bgMu.Lock()
+	runningWhenShown := a.streamCancel != nil
+	a.bgMu.Unlock()
+	if !runningWhenShown {
+		t.Fatal("expected OnWindowShown to start telemetry streams when core is running")
+	}
+
+	// Closing the window stops streams immediately.
+	a.OnWindowClosed()
+	a.bgMu.Lock()
+	runningAfterClose := a.streamCancel != nil
+	a.bgMu.Unlock()
+	if runningAfterClose {
+		t.Fatal("expected OnWindowClosed to stop telemetry streams")
+	}
+}

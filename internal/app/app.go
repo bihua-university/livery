@@ -502,7 +502,7 @@ func (a *App) OnCoreState(info model.CoreInfo) {
 			a.onTrayRefresh()
 		}
 	})
-	if info.Status == model.CoreRunning {
+	if info.Status == model.CoreRunning && !a.WindowHidden.Load() && !a.shuttingDown.Load() {
 		a.startStreams()
 	} else {
 		a.stopStreams()
@@ -615,14 +615,30 @@ func (a *App) SetWindowHidden(hidden bool) {
 	a.WindowHidden.Store(hidden)
 	if hidden {
 		a.SetOverviewVisible(false)
+		a.stopStreams()
 	}
 }
 
-// OnWindowClosed detaches the closed window, drops transient UI data, and trims unused OS memory.
+// OnWindowShown resumes UI telemetry streams and syncs fresh snapshots when the window becomes visible.
+func (a *App) OnWindowShown() {
+	a.FlushHiddenTraffic()
+	if !a.shuttingDown.Load() && a.CM.Info().Status == model.CoreRunning {
+		a.bgMu.Lock()
+		running := a.streamCancel != nil
+		a.bgMu.Unlock()
+		if !running {
+			a.startStreams()
+		}
+	}
+	a.RequestSnapshotSync()
+}
+
+// OnWindowClosed detaches the closed window, stops UI telemetry streams, drops transient UI data, and trims unused OS memory.
 func (a *App) OnWindowClosed() {
 	a.win = nil
 	a.WindowHidden.Store(true)
 	a.SetOverviewVisible(false)
+	a.stopStreams()
 	a.ReleaseLogsView()
 	a.ReleaseRulesView()
 	a.ReleaseEditorState()
@@ -639,8 +655,9 @@ func (a *App) OnWindowClosed() {
 	a.FreeOSMemoryAndTrimAsync()
 }
 
-// ReleaseHiddenData drops transient proxy and connection state when hidden to tray and returns freed memory to OS.
+// ReleaseHiddenData stops UI telemetry streams, drops transient proxy/connection state when hidden to tray, and returns freed memory to OS.
 func (a *App) ReleaseHiddenData() {
+	a.stopStreams()
 	a.Groups = nil
 	a.Nodes = nil
 	a.Conns = nil
@@ -972,7 +989,11 @@ func (a *App) WakeProxyGuard() {
 }
 
 func (a *App) proxyGuardDuration() time.Duration {
-	sec := a.PM.Settings().ProxyGuardInterval
+	s := a.PM.Settings()
+	if !s.ProxyGuard || !s.SystemProxyEnabled {
+		return 24 * time.Hour
+	}
+	sec := s.ProxyGuardInterval
 	if sec <= 0 {
 		sec = 10
 	}
@@ -1246,6 +1267,12 @@ func (a *App) stopStreams() {
 	a.bgMu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	a.apiMu.Lock()
+	client := a.apiClient
+	a.apiMu.Unlock()
+	if client != nil {
+		client.CloseIdleConnections()
 	}
 }
 
@@ -1942,6 +1969,7 @@ func (a *App) FindProfile(id string) (model.Profile, bool) {
 // ApplySettings persists SettingsData and optionally restarts the core.
 func (a *App) ApplySettings(restartIfRunning bool) {
 	_ = a.PM.SaveSettings(a.SettingsData)
+	a.WakeProxyGuard()
 	if restartIfRunning && a.CoreInfo.Status == model.CoreRunning {
 		go a.RestartCore()
 	}

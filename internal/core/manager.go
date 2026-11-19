@@ -229,6 +229,9 @@ func (m *Manager) singBoxWorkDir() string {
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 func stripANSI(s string) string {
+	if !strings.ContainsRune(s, '\x1b') {
+		return s
+	}
 	return ansiPattern.ReplaceAllString(s, "")
 }
 

@@ -28,8 +28,7 @@ func View(c *ui.Context, a *app.App) {
 		}
 	} else {
 		if wasHidden {
-			a.FlushHiddenTraffic()
-			a.RequestSnapshotSync()
+			a.OnWindowShown()
 		}
 		if a.Page != a.PrevPage {
 			a.PrevPage = a.Page

@@ -56,6 +56,19 @@ func New(host string, port int, secret string) *Client {
 	}
 }
 
+// CloseIdleConnections closes any idle keep-alive sockets held by the Clash API HTTP transports.
+func (c *Client) CloseIdleConnections() {
+	if c == nil {
+		return
+	}
+	if c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+	if c.stream != nil {
+		c.stream.CloseIdleConnections()
+	}
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
