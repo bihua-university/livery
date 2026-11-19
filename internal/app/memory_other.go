@@ -2,6 +2,10 @@
 
 package app
 
-func sampleProcessRSS() int64 {
+func sampleProcessPrivateMemory(int) int64 {
+	return 0
+}
+
+func findCoreListenerPID(int, string) int {
 	return 0
 }

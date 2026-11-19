@@ -562,18 +562,25 @@ func (a *App) SetOverviewVisible(visible bool) {
 	}
 }
 
-// RefreshAppMemoryAsync samples current process RSS off the UI thread and publishes updates to Overview.
+// RefreshAppMemoryAsync samples current app and core private memory off the UI thread and publishes updates to Overview.
 func (a *App) RefreshAppMemoryAsync() {
 	go func() {
 		if a.shuttingDown.Load() || a.WindowHidden.Load() || !a.overviewVisible.Load() {
 			return
 		}
 		appMem := sampleAppMemory()
+		var coreMem int64
+		if info := a.CM.Info(); info.Status == model.CoreRunning {
+			coreMem = sampleCoreProcessMemory(info, a.PM.Settings().ClashAPIPort)
+		}
 		a.UpdateUI(func() {
 			if a.WindowHidden.Load() || a.Page != PageOverview {
 				return
 			}
 			a.AppMemoryBytes = appMem
+			if coreMem > 0 && a.CoreInfo.Status == model.CoreRunning {
+				a.MemoryBytes = coreMem
+			}
 		})
 	}()
 }
@@ -905,11 +912,15 @@ func (a *App) startStreams() {
 				if a.WindowHidden.Load() {
 					return
 				}
+				displayMem := mem
+				if osMem := sampleCoreProcessMemory(a.CM.Info(), a.PM.Settings().ClashAPIPort); osMem > 0 {
+					displayMem = osMem
+				}
 				a.UpdateUI(func() {
 					if a.WindowHidden.Load() || a.CoreInfo.Status != model.CoreRunning {
 						return
 					}
-					a.MemoryBytes = mem
+					a.MemoryBytes = displayMem
 				})
 			})
 			if errors.Is(err, clashapi.ErrUnsupported) {
@@ -949,13 +960,17 @@ func (a *App) startStreams() {
 			if a.Page == PageConnections || a.Page == PageOverview {
 				if snap, err := client.GetConnections(ctx); err == nil {
 					appMem := sampleAppMemory()
+					coreMem := sampleCoreProcessMemory(a.CM.Info(), a.PM.Settings().ClashAPIPort)
 					a.UpdateUI(func() {
 						if a.WindowHidden.Load() || a.CoreInfo.Status != model.CoreRunning {
 							return
 						}
 						a.TotalUp = snap.UploadTotal
 						a.TotalDown = snap.DownloadTotal
-						mem := snap.Memory
+						mem := coreMem
+						if mem <= 0 {
+							mem = snap.Memory
+						}
 						if mem <= 0 {
 							mem = a.streamedCoreMem.Load()
 						}

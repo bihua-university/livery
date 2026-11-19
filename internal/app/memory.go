@@ -1,66 +1,46 @@
 package app
 
 import (
-	"runtime/metrics"
-	"strconv"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+
+	"github.com/bihua-university/livery/internal/model"
 )
 
-// sampleAppMemory returns the current process resident set size (RSS) in bytes,
-// falling back to Go runtime mapped memory if OS RSS is unavailable.
+// sampleAppMemory returns this process's private physical memory (PrivateWorkingSetSize on Windows,
+// Private_Clean+Private_Dirty on Linux, phys_footprint on macOS), falling back to Go heap alloc.
 func sampleAppMemory() int64 {
-	if rss := sampleProcessRSS(); rss > 0 {
-		return rss
+	if mem := sampleProcessPrivateMemory(os.Getpid()); mem > 0 {
+		return mem
 	}
-	return sampleRuntimeMemory()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return int64(ms.HeapAlloc)
 }
 
-func sampleRuntimeMemory() int64 {
-	var samples [3]metrics.Sample
-	samples[0].Name = "/memory/classes/total:bytes"
-	samples[1].Name = "/memory/classes/heap/released:bytes"
-	samples[2].Name = "/memory/classes/heap/objects:bytes"
-	metrics.Read(samples[:])
-
-	var total, released, objects uint64
-	if samples[0].Value.Kind() == metrics.KindUint64 {
-		total = samples[0].Value.Uint64()
+// sampleCoreProcessMemory returns the running core's private physical memory when its PID is known
+// or resolvable from the local Clash API port.
+func sampleCoreProcessMemory(info model.CoreInfo, apiPort int) int64 {
+	pid := info.PID
+	if pid <= 0 && info.External && apiPort > 0 {
+		pid = findCoreListenerPID(apiPort, info.BinaryPath)
 	}
-	if samples[1].Value.Kind() == metrics.KindUint64 {
-		released = samples[1].Value.Uint64()
+	if pid <= 0 {
+		return 0
 	}
-	if samples[2].Value.Kind() == metrics.KindUint64 {
-		objects = samples[2].Value.Uint64()
-	}
-	if total > released {
-		return int64(total - released)
-	}
-	return int64(objects)
+	return sampleProcessPrivateMemory(pid)
 }
 
-func parseProcStatmRSS(data []byte, pageSize int64) int64 {
-	if pageSize <= 0 {
-		return 0
+func isKnownCoreExecutable(name, configuredPath string) bool {
+	base := strings.ToLower(strings.TrimSpace(filepath.Base(name)))
+	switch base {
+	case "mihomo", "mihomo.exe", "clash-meta", "clash-meta.exe", "sing-box", "sing-box.exe":
+		return true
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 2 {
-		return 0
+	if cfg := strings.TrimSpace(configuredPath); cfg != "" {
+		return base == strings.ToLower(strings.TrimSpace(filepath.Base(cfg)))
 	}
-	pages, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil || pages <= 0 {
-		return 0
-	}
-	return pages * pageSize
-}
-
-func parsePSRssKiB(data []byte) int64 {
-	s := strings.TrimSpace(string(data))
-	if s == "" {
-		return 0
-	}
-	kib, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || kib <= 0 {
-		return 0
-	}
-	return kib * 1024
+	return false
 }
