@@ -10,5 +10,9 @@ func findCoreListenerPID(int, string) int {
 	return 0
 }
 
+func processExePath(int) string {
+	return ""
+}
+
 func trimProcessMemory() {}
 

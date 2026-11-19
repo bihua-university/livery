@@ -190,6 +190,7 @@ type App struct {
 	coreOpBusy        atomic.Bool
 	sysproxyMu        sync.Mutex
 	shuttingDown      atomic.Bool
+	shutdownOnce      sync.Once
 	proxyGuardWakeCh  chan struct{}
 	streamCancel      context.CancelFunc
 	syncWakeCh        chan struct{}
@@ -1401,7 +1402,7 @@ func (a *App) StartCore() {
 }
 
 func (a *App) startCoreLocked(tryAttach bool) {
-	if a.CM.Info().Status == model.CoreRunning {
+	if a.shuttingDown.Load() || a.CM.Info().Status == model.CoreRunning {
 		return
 	}
 	coreName := a.CoreDisplayName()
@@ -1420,10 +1421,16 @@ func (a *App) startCoreLocked(tryAttach bool) {
 		})
 		return
 	}
+	if a.shuttingDown.Load() {
+		return
+	}
 	a.UpdateUI(func() {
 		a.ReloadRulesFromActiveProfile()
 	})
 	if err := a.CM.Start(runtimePath); err != nil {
+		if a.shuttingDown.Load() {
+			return
+		}
 		a.UpdateUI(func() {
 			a.Notify(a.Tr("启动失败: ", "Start failed: ") + err.Error())
 		})
@@ -1452,6 +1459,9 @@ func (a *App) StopCore() {
 
 // RestartCore compiles and restarts a managed core instance cleanly under lock.
 func (a *App) RestartCore() {
+	if a.shuttingDown.Load() {
+		return
+	}
 	if !a.coreOpBusy.CompareAndSwap(false, true) {
 		return
 	}
@@ -1459,6 +1469,9 @@ func (a *App) RestartCore() {
 
 	a.coreOpMu.Lock()
 	defer a.coreOpMu.Unlock()
+	if a.shuttingDown.Load() {
+		return
+	}
 
 	if a.CM.Info().External {
 		a.UpdateUI(func() {
@@ -1557,19 +1570,27 @@ func (a *App) SetProxyMode(mode model.ProxyMode) {
 // Shutdown cleans up core, drains proxy guard, disables system proxy, and closes logs before exit.
 func (a *App) Shutdown() {
 	a.shuttingDown.Store(true)
-	a.WakeProxyGuard()
-	a.stopStreams()
-	a.CM.Stop()
+	a.shutdownOnce.Do(func() {
+		a.WakeProxyGuard()
+		a.stopStreams()
 
-	a.sysproxyMu.Lock()
-	if a.PM.Settings().SystemProxyEnabled || a.SettingsData.SystemProxyEnabled {
-		_ = sysproxy.Disable()
-	}
-	a.sysproxyMu.Unlock()
+		info := a.CM.Info()
+		s := a.PM.Settings()
+		a.CM.Close()
+		if info.External {
+			terminateOwnedExternalCore(s.ClashAPIPort, a.PM.BinDir(), info.BinaryPath)
+		}
 
-	if a.LogStore != nil {
-		_ = a.LogStore.Close()
-	}
+		a.sysproxyMu.Lock()
+		if s.SystemProxyEnabled || a.SettingsData.SystemProxyEnabled {
+			_ = sysproxy.Disable()
+		}
+		a.sysproxyMu.Unlock()
+
+		if a.LogStore != nil {
+			_ = a.LogStore.Close()
+		}
+	})
 }
 
 // SelectProxy selects an outbound node inside a selector group.

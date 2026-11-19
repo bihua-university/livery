@@ -81,5 +81,16 @@ func findCoreListenerPID(port int, configuredPath string) int {
 	return 0
 }
 
+func processExePath(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(target, " (deleted)")
+}
+
 func trimProcessMemory() {}
 

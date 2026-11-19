@@ -2,7 +2,7 @@
   "name": "Livery",
   "slug": "livery",
   "identifier": "io.github.bihua-university.livery",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "license": "MIT",
   "out": "build",
   "updates": {

@@ -28,6 +28,9 @@ type Manager struct {
 	cmd         *exec.Cmd
 	cancel      context.CancelFunc
 	waitDone    chan struct{}
+	guard       *processGuard
+	startCancel context.CancelFunc
+	closed      bool
 	info        model.CoreInfo
 	onState     func(model.CoreInfo)
 	onLog       func(model.LogEntry)
@@ -250,13 +253,17 @@ func (m *Manager) emitLog(level, msg string) {
 
 // CheckConfig validates config syntax & schema using the active core binary.
 func (m *Manager) CheckConfig(configPath string) error {
+	return m.checkConfigContext(context.Background(), configPath)
+}
+
+func (m *Manager) checkConfigContext(parent context.Context, configPath string) error {
 	info := m.Info()
 	ct := model.NormalizeCoreType(info.CoreType)
 	coreName := model.CoreDisplayName(ct)
 	if !info.Found {
 		return fmt.Errorf("%s binary not found", coreName)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -286,7 +293,30 @@ func (m *Manager) CheckConfig(configPath string) error {
 
 // Start launches the active core (mihomo or sing-box) with the compiled runtime config file.
 func (m *Manager) Start(configPath string) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errors.New("core manager is shutting down")
+	}
+	m.mu.Unlock()
+
 	m.Stop()
+
+	startCtx, startCancel := context.WithCancel(context.Background())
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		startCancel()
+		return errors.New("core manager is shutting down")
+	}
+	m.startCancel = startCancel
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.startCancel = nil
+		m.mu.Unlock()
+		startCancel()
+	}()
 
 	info := m.RefreshBinaryInfo(m.customPath)
 	ct := model.NormalizeCoreType(info.CoreType)
@@ -299,7 +329,10 @@ func (m *Manager) Start(configPath string) error {
 	}
 
 	m.emitLog("info", fmt.Sprintf("Checking config: %s", configPath))
-	if err := m.CheckConfig(configPath); err != nil {
+	if err := m.checkConfigContext(startCtx, configPath); err != nil {
+		if m.isClosed() {
+			return errors.New("core manager is shutting down")
+		}
 		m.setError(err.Error())
 		return err
 	}
@@ -331,6 +364,11 @@ func (m *Manager) Start(configPath string) error {
 	}
 
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		cancel()
+		return errors.New("core manager is shutting down")
+	}
 	m.info.Status = model.CoreStarting
 	m.info.LastError = ""
 	m.info.RuntimePath = configPath
@@ -345,14 +383,22 @@ func (m *Manager) Start(configPath string) error {
 		m.setError(err.Error())
 		return err
 	}
-
-	m.emitLog("info", fmt.Sprintf("%s %s started (PID %d)", coreName, info.Version, cmd.Process.Pid))
+	guard := attachProcessGuard(cmd)
 
 	waitDone := make(chan struct{})
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		terminateProcessForce(cmd, guard)
+		cancel()
+		_ = cmd.Wait()
+		guard.Close()
+		return errors.New("core manager is shutting down")
+	}
 	m.cmd = cmd
 	m.cancel = cancel
 	m.waitDone = waitDone
+	m.guard = guard
 	m.info.Status = model.CoreRunning
 	m.info.External = false
 	m.info.PID = cmd.Process.Pid
@@ -360,6 +406,8 @@ func (m *Manager) Start(configPath string) error {
 	m.info.LastError = ""
 	snap := m.info
 	m.mu.Unlock()
+
+	m.emitLog("info", fmt.Sprintf("%s %s started (PID %d)", coreName, info.Version, cmd.Process.Pid))
 	m.emitState(snap)
 
 	var logWG sync.WaitGroup
@@ -373,8 +421,9 @@ func (m *Manager) Start(configPath string) error {
 		m.pipeLogs(stderr, "warning")
 	}()
 
-	go func(c *exec.Cmd, name string, wd chan struct{}) {
+	go func(c *exec.Cmd, g *processGuard, name string, wd chan struct{}) {
 		defer close(wd)
+		defer g.Close()
 		logWG.Wait()
 		waitErr := c.Wait()
 		m.mu.Lock()
@@ -383,11 +432,12 @@ func (m *Manager) Start(configPath string) error {
 			m.mu.Unlock()
 			return
 		}
-		wasStopping := m.stopping
+		wasStopping := m.stopping || m.closed
 		errDetail := m.lastErrLine
 		m.cmd = nil
 		m.cancel = nil
 		m.waitDone = nil
+		m.guard = nil
 		m.info.PID = 0
 		var logLevel, logMsg string
 		if wasStopping || waitErr == nil {
@@ -409,15 +459,21 @@ func (m *Manager) Start(configPath string) error {
 
 		m.emitLog(logLevel, logMsg)
 		m.emitState(snap)
-	}(cmd, coreName, waitDone)
+	}(cmd, guard, coreName, waitDone)
 
 	return nil
+}
+
+func (m *Manager) isClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
 }
 
 // AttachExternal marks the core as running by connecting to an already-active external Clash API instance.
 func (m *Manager) AttachExternal(version, endpoint string) {
 	m.mu.Lock()
-	if m.cmd != nil {
+	if m.cmd != nil || m.closed {
 		m.mu.Unlock()
 		return
 	}
@@ -453,12 +509,25 @@ func (m *Manager) DetachExternal() {
 	m.emitState(snap)
 }
 
+// Close permanently shuts down the manager, cancels any in-flight start, and terminates any running core process.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	m.closed = true
+	startCancel := m.startCancel
+	m.mu.Unlock()
+	if startCancel != nil {
+		startCancel()
+	}
+	m.Stop()
+}
+
 // Stop terminates the running core process cleanly, or detaches if external.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	cmd := m.cmd
 	cancel := m.cancel
 	waitDone := m.waitDone
+	guard := m.guard
 	coreName := model.CoreDisplayName(m.coreType)
 	if cmd == nil {
 		wasExternal := m.info.External
@@ -476,9 +545,10 @@ func (m *Manager) Stop() {
 	m.stopping = true
 	m.mu.Unlock()
 
-	if cmd.Process != nil && cmd.Process.Signal(os.Interrupt) == nil && waitDone != nil {
+	if terminateProcessGraceful(cmd) && waitDone != nil {
 		select {
 		case <-waitDone:
+			guard.Close()
 			return
 		case <-time.After(2 * time.Second):
 		}
@@ -487,22 +557,23 @@ func (m *Manager) Stop() {
 	if cancel != nil {
 		cancel()
 	}
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
+	terminateProcessForce(cmd, guard)
 	if waitDone != nil {
 		select {
 		case <-waitDone:
+			guard.Close()
 			return
 		case <-time.After(2 * time.Second):
 		}
 	}
+	guard.Close()
 
 	m.mu.Lock()
 	if m.cmd == cmd {
 		m.cmd = nil
 		m.cancel = nil
 		m.waitDone = nil
+		m.guard = nil
 		m.info.PID = 0
 		m.info.Status = model.CoreStopped
 		snap := m.info

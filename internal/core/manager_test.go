@@ -275,3 +275,33 @@ func TestResolveCoreDownloadTargetAndDirResolution(t *testing.T) {
 		t.Fatalf("expected default workDirs after reset, got singBox=%q mihomo=%q", mgr.singBoxWorkDir(), mgr.mihomoWorkDir())
 	}
 }
+
+func TestManagerCloseTerminatesProcessAndBlocksFutureStarts(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	t.Setenv("LIVERY_TEST_HELPER", "1")
+
+	mgr := NewManagerWithConfig(model.CoreSingBox, exe, "", dir, dir, nil, nil)
+	if err := mgr.Start(cfgFile); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if info := mgr.Info(); info.Status != model.CoreRunning || info.PID <= 0 {
+		t.Fatalf("expected running core with positive PID, got %+v", info)
+	}
+
+	mgr.Close()
+
+	if info := mgr.Info(); info.Status != model.CoreStopped || info.PID != 0 {
+		t.Fatalf("expected stopped core with PID=0 after Close, got %+v", info)
+	}
+	if err := mgr.Start(cfgFile); err == nil {
+		t.Fatal("expected Start after Close to fail and refuse spawning a new process")
+	}
+}

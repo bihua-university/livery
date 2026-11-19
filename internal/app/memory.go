@@ -44,3 +44,41 @@ func isKnownCoreExecutable(name, configuredPath string) bool {
 	}
 	return false
 }
+
+// isManagedCoreExecutablePath reports whether exePath points to a mihomo or sing-box
+// binary owned by Livery (under binDir or matching the configured core binary path).
+func isManagedCoreExecutablePath(exePath, binDir, configuredPath string) bool {
+	exePath = strings.TrimSpace(exePath)
+	if exePath == "" || !isKnownCoreExecutable(exePath, configuredPath) {
+		return false
+	}
+	cleanExe := filepath.Clean(exePath)
+	if cfg := strings.TrimSpace(configuredPath); cfg != "" {
+		if strings.EqualFold(cleanExe, filepath.Clean(cfg)) {
+			return true
+		}
+	}
+	if bin := strings.TrimSpace(binDir); bin != "" {
+		rel, err := filepath.Rel(filepath.Clean(bin), cleanExe)
+		if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func terminateOwnedExternalCore(port int, binDir, configuredPath string) {
+	if port <= 0 {
+		return
+	}
+	pid := findCoreListenerPID(port, configuredPath)
+	if pid <= 0 || pid == os.Getpid() {
+		return
+	}
+	if !isManagedCoreExecutablePath(processExePath(pid), binDir, configuredPath) {
+		return
+	}
+	if proc, err := os.FindProcess(pid); err == nil && proc != nil {
+		_ = proc.Kill()
+	}
+}

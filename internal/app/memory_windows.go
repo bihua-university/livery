@@ -105,7 +105,7 @@ func findCoreListenerPID(port int, configuredPath string) int {
 	return 0
 }
 
-func processExeBaseName(pid int) string {
+func processExePath(pid int) string {
 	h, _, _ := memOpenProcess.Call(processQueryLimitedInformation, 0, uintptr(pid))
 	if h == 0 {
 		return ""
@@ -117,7 +117,15 @@ func processExeBaseName(pid int) string {
 	if r, _, _ := memQueryFullProcessImageName.Call(h, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size))); r == 0 || size == 0 {
 		return ""
 	}
-	return filepath.Base(syscall.UTF16ToString(buf[:size]))
+	return syscall.UTF16ToString(buf[:size])
+}
+
+func processExeBaseName(pid int) string {
+	p := processExePath(pid)
+	if p == "" {
+		return ""
+	}
+	return filepath.Base(p)
 }
 
 func trimProcessMemory() {

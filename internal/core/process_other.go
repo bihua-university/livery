@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !unix
 
 package core
 
@@ -10,7 +10,26 @@ import (
 	"github.com/bihua-university/livery/internal/model"
 )
 
+type processGuard struct{}
+
+func attachProcessGuard(_ *exec.Cmd) *processGuard { return nil }
+func (*processGuard) Terminate()                   {}
+func (*processGuard) Close()                       {}
+
 func configureCommand(_ *exec.Cmd) {}
+
+func terminateProcessGraceful(cmd *exec.Cmd) bool {
+	if cmd == nil || cmd.Process == nil {
+		return false
+	}
+	return cmd.Process.Signal(os.Interrupt) == nil
+}
+
+func terminateProcessForce(cmd *exec.Cmd, _ *processGuard) {
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
 
 // IsElevated reports whether the current process runs as root.
 func IsElevated() bool {

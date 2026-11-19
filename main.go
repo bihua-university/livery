@@ -4,10 +4,13 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
+	"syscall"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/updater"
@@ -70,6 +73,7 @@ func main() {
 		},
 	)
 	controller = app.New(pm, cm)
+	defer controller.Shutdown()
 	controller.SetMainRunner(mygo.RunOnMain)
 
 	if s0.Language == model.LangEN {
@@ -115,7 +119,7 @@ func main() {
 	}
 
 	var mainWin *mygo.Window
-	var quitting bool
+	var quitting atomic.Bool
 	var hideToTray bool
 
 	showWindow := func() {
@@ -162,14 +166,29 @@ func main() {
 	mygo.App.OnWindowAllClosed(func() {
 		shouldHide := hideToTray
 		hideToTray = false
-		if automationMode || quitting || (!shouldHide && controller.Settings().CloseAction == model.CloseQuit) {
+		if automationMode || quitting.Load() || (!shouldHide && controller.Settings().CloseAction == model.CloseQuit) {
 			mygo.App.Quit()
 		}
 	})
 	mygo.App.OnBeforeQuit(func(_ *mygo.QuitEvent) {
-		quitting = true
+		quitting.Store(true)
 		controller.Shutdown()
 	})
+	mygo.App.OnQuit(func() {
+		quitting.Store(true)
+		controller.Shutdown()
+	})
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		if _, ok := <-sigCh; ok {
+			quitting.Store(true)
+			controller.Shutdown()
+			mygo.App.Quit()
+		}
+	}()
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
