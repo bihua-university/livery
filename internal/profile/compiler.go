@@ -69,6 +69,17 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 		}
 	}
 
+	// Preserve profile values until a core option is explicitly set.
+	if settings.TCPConcurrent != nil {
+		cfg["tcp-concurrent"] = *settings.TCPConcurrent
+	}
+	if settings.IPv6 != nil {
+		cfg["ipv6"] = *settings.IPv6
+	}
+	if settings.GeoDataLoader == "standard" || settings.GeoDataLoader == "memconservative" {
+		cfg["geodata-loader"] = settings.GeoDataLoader
+	}
+
 	// 2. Log level override.
 	if prof.Override.OverrideLog || cfg["log-level"] == nil {
 		if lvl := mapMihomoLogLevel(settings.LogLevel); lvl != "" {
@@ -213,6 +224,9 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 	for _, r := range settings.CustomRules {
 		if !r.Enabled || strings.TrimSpace(r.Pattern) == "" || strings.TrimSpace(r.Outbound) == "" {
 			continue
+		}
+		if r.FromConnection && r.Outbound != "direct" && r.Outbound != "block" && r.Outbound != "GLOBAL" && !hasNamedEntry(cfg["proxy-groups"], "name", r.Outbound) {
+			continue // This profile does not provide the selected group.
 		}
 		lines := customRuleToClashLines(r, cfg)
 		if r.Prepend {
@@ -581,6 +595,17 @@ func Compile(rawJSON []byte, prof model.Profile, settings model.AppSettings) ([]
 			continue
 		}
 		obj := customRuleToSingBox(r)
+		if r.FromConnection {
+			switch r.Outbound {
+			case "direct":
+				obj["outbound"] = ensureSingBoxDirectTag(cfg)
+			case "block": // The reject action is independent of outbound tags.
+			default:
+				if !hasNamedEntry(cfg["outbounds"], "tag", r.Outbound) {
+					continue
+				}
+			}
+		}
 		if r.Prepend {
 			prepended = append(prepended, obj)
 		} else {
@@ -698,6 +723,28 @@ func findSingBoxDirectTag(cfg map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func hasNamedEntry(entries any, key, name string) bool {
+	for _, item := range toSlice(entries) {
+		entry, _ := item.(map[string]any)
+		if entry[key] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureSingBoxDirectTag(cfg map[string]any) string {
+	if existing := findSingBoxDirectTag(cfg); existing != "" {
+		return existing
+	}
+	tag := "direct"
+	for hasNamedEntry(cfg["outbounds"], "tag", tag) {
+		tag += "-direct"
+	}
+	cfg["outbounds"] = append(toSlice(cfg["outbounds"]), map[string]any{"type": "direct", "tag": tag})
+	return tag
 }
 
 func missingTailscaleSingBoxRules(existing []any, directTag string) []any {

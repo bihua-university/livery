@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/bihua-university/livery/internal/model"
 )
@@ -20,6 +21,23 @@ func newMockClient(handler http.Handler) (*Client, func()) {
 	host, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
 	return New(host, port, "secret123"), srv.Close
+}
+
+func TestDelayRequestsUseConfiguredTimeout(t *testing.T) {
+	c, closeServer := newMockClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("timeout") != "12000" {
+			t.Errorf("unexpected timeout: %s", r.URL.RawQuery)
+		}
+		fmt.Fprint(w, `{"delay": 12}`)
+	}))
+	defer closeServer()
+	c.http.Timeout = time.Nanosecond
+	if _, err := c.TestDelay(t.Context(), "node", "", 12000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.TestGroupDelay(t.Context(), "group", "", 12000); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestClientProxiesAndSelection(t *testing.T) {

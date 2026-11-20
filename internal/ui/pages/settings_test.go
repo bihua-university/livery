@@ -141,6 +141,7 @@ func TestSettingsTUNBypassPrivateRouteCheckbox(t *testing.T) {
 	if !tester.HasText("绕过私有路由") {
 		t.Fatalf("expected 绕过私有路由 checkbox, texts: %v", tester.Texts())
 	}
+	tester.Scroll(480, 450, 0, 450)
 	if err := tester.Click("绕过私有路由"); err != nil {
 		t.Fatalf("Click(绕过私有路由): %v", err)
 	}

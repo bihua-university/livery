@@ -95,6 +95,21 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 							a.ApplySettings(false)
 						}
 					})
+					ui.Column(c).Grow(1).Gap(4).Children(func() {
+						ui.Text(c, a.Tr("测速超时 (ms)", "Test timeout (ms)")).FontSize(s.SM).TextColor(p.ForegroundSubtle)
+						ui.Row(c).Gap(4).Children(func() {
+							submit := ui.TextInput(c.Key("delay-timeout"), &a.DelayTimeoutDraft).Grow(1).MinWidth(54).Submitted()
+							save := components.IconActionButton(c.Key("save-delay-timeout"), p, icons.Check, a.Tr("保存测速超时", "Save test timeout")).Disabled(a.SavingPreference)
+							if submit || save.Clicked() {
+								ms, err := strconv.Atoi(strings.TrimSpace(a.DelayTimeoutDraft))
+								if err != nil || ms < 1 || ms > 65535 {
+									a.Notify(a.Tr("测速超时须为 1–65535 毫秒", "Enter a timeout from 1 to 65535 ms"))
+									return
+								}
+								a.SavePreference(func(s *model.AppSettings) { s.DelayTestTimeoutMs = ms }, nil)
+							}
+						})
+					})
 					if components.LabeledSelect(c, p, s, "set-log-lvl", a.Tr("日志级别", "Log Level"), &a.SettingsData.LogLevel, []string{"trace", "debug", "info", "warn", "error"}).Changed() {
 						a.ApplySettings(true)
 					}
@@ -135,6 +150,42 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 			})
 
 			if model.NormalizeCoreType(a.SettingsData.CoreType) == model.CoreMihomo {
+				components.Card(c, p, func() {
+					components.SectionHeader(c, p, s, a.Tr("Mihomo 基础选项", "Mihomo options"), nil)
+					boolLabels := []string{a.Tr("跟随配置", "Use profile"), a.Tr("开启", "On"), a.Tr("关闭", "Off")}
+					boolRow := func(key, label string, value *bool, set func(*model.AppSettings, *bool)) {
+						idx := 0
+						if value != nil {
+							idx = 2
+							if *value {
+								idx = 1
+							}
+						}
+						ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+							ui.Text(c, label).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
+							if components.Segmented(c.Key(key), p, s, &idx, boolLabels).Disabled(a.SavingPreference || a.IsCoreBusy()).Changed() {
+								var override *bool
+								if idx > 0 {
+									on := idx == 1
+									override = &on
+								}
+								a.SavePreference(func(s *model.AppSettings) { set(s, override) }, a.ApplyProfileChanges)
+							}
+						})
+					}
+					boolRow("set-tcp-concurrent", a.Tr("TCP 并发连接", "Concurrent TCP connections"), a.SettingsData.TCPConcurrent, func(s *model.AppSettings, v *bool) { s.TCPConcurrent = v })
+					boolRow("set-ipv6", "IPv6", a.SettingsData.IPv6, func(s *model.AppSettings, v *bool) { s.IPv6 = v })
+					ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+						ui.Text(c, a.Tr("Geo 数据加载器", "Geo data loader")).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
+						values := []string{"", "standard", "memconservative"}
+						idx := max(0, slices.Index(values, a.SettingsData.GeoDataLoader))
+						labels := []string{boolLabels[0], a.Tr("标准", "Standard"), a.Tr("低内存", "Low memory")}
+						if components.Segmented(c.Key("set-geodata-loader"), p, s, &idx, labels).Disabled(a.SavingPreference || a.IsCoreBusy()).Changed() {
+							loader := values[idx]
+							a.SavePreference(func(s *model.AppSettings) { s.GeoDataLoader = loader }, a.ApplyProfileChanges)
+						}
+					})
+				})
 				components.Card(c, p, func() {
 					components.SectionHeader(c, p, s, a.Tr("DNS 缓存", "DNS cache"), func() {
 						if components.ActionButton(c.Key("dns-cache-flush"), p, s, icons.Refresh, a.Tr("清理缓存", "Clear cache")).Disabled(a.CoreInfo.Status != model.CoreRunning || a.FlushingDNS).Clicked() {

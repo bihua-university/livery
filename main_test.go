@@ -526,7 +526,7 @@ func startMockMihomo(t *testing.T) *mockMihomo {
 					"name":    "US-01",
 					"type":    "VLESS",
 					"udp":     false,
-					"history": []map[string]any{{"delay": 210}},
+					"history": []map[string]any{{"delay": 0}},
 				},
 				"SG-01": map[string]any{
 					"name":    "SG-01",
@@ -584,6 +584,7 @@ func startMockMihomo(t *testing.T) *mockMihomo {
 					"chains":   []string{"HK-01", "选择节点"},
 					"rule":     "DomainSuffix",
 				},
+				{"id": "conn-2", "metadata": map[string]any{"host": "second.example"}, "download": 12, "start": time.Now().Format(time.RFC3339)},
 			},
 		})
 	})
@@ -792,6 +793,12 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 		_, ok := findByKey(nodes, "node-Streaming-SG-01")
 		return ok
 	})
+	h.pressKey("px-hide-timeouts")
+	h.waitUntil(5*time.Second, "timed-out member hidden", func(nodes []autoNode) bool {
+		_, healthy := findByKey(nodes, "node-Streaming-SG-01")
+		_, failed := findByKey(nodes, "node-Streaming-US-01")
+		return healthy && !failed
+	})
 	h.pressKey("node-Streaming-SG-01")
 	deadline = time.Now().Add(5 * time.Second)
 	for {
@@ -828,6 +835,19 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 	h.waitUntil(5*time.Second, "active connection rendered", func(nodes []autoNode) bool {
 		return hasNodeText(nodes, "example.com:443")
 	})
+	for _, first := range []string{"conn-rule-conn-2", "conn-rule-conn-1"} {
+		h.pressLabel("下行")
+		h.waitUntil(5*time.Second, "connections sorted by download", func(nodes []autoNode) bool {
+			for _, n := range nodes {
+				if strings.HasPrefix(n.keyString(), "conn-rule-") {
+					return n.keyString() == first
+				}
+			}
+			return false
+		})
+	}
+	h.pressKey("conn-rule-conn-1")
+	h.pressLabel("拦截")
 
 	// 4. Rules page displays mock Mihomo rules and persists a custom rule via modal.
 	h.pressKey("nav-rules")
@@ -842,15 +862,19 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 	h.setValueKey("rule-pat-in", "openai.com")
 	h.pressLabel("添加并应用")
 	h.waitUntil(5*time.Second, "custom rule rendered in rules page", func(nodes []autoNode) bool {
-		return hasNodeText(nodes, "openai.com")
+		_, editing := findByKey(nodes, "rule-pat-in")
+		return !editing && hasNodeText(nodes, "openai.com")
 	})
 	s := h.readSettings()
-	if len(s.CustomRules) != 1 || s.CustomRules[0].Pattern != "openai.com" {
-		t.Fatalf("expected custom rule openai.com persisted in settings.json, got %+v", s.CustomRules)
+	if len(s.CustomRules) != 2 || s.CustomRules[0].Pattern != "example.com" || s.CustomRules[0].Outbound != "block" || s.CustomRules[1].Pattern != "openai.com" {
+		t.Fatalf("expected connection and manual rules persisted, got %+v", s.CustomRules)
 	}
 
 	// 5. Settings page: switch language to English and theme to Dark, verify persistence.
 	h.pressKey("nav-settings")
+	h.setValueKey("delay-timeout", "12000")
+	h.pressKey("save-delay-timeout")
+	h.pressLabel("低内存")
 	mock.mu.Lock()
 	mock.mixedPort = s.MixedPort
 	mock.mu.Unlock()
@@ -877,6 +901,9 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 	})
 	if saved := h.readSettings(); !saved.AllowLAN || saved.MixedPort != newPort {
 		t.Fatalf("inbound settings were not persisted: allow-lan=%t mixed-port=%d", saved.AllowLAN, saved.MixedPort)
+	}
+	if saved := h.readSettings(); saved.DelayTestTimeoutMs != 12000 || !saved.HideTimedOutNodes || saved.GeoDataLoader != "memconservative" {
+		t.Fatalf("preferences after UI changes: timeout=%d hide=%v loader=%q", saved.DelayTestTimeoutMs, saved.HideTimedOutNodes, saved.GeoDataLoader)
 	}
 	for _, choice := range []struct{ label, mode string }{{"redir-host", "redir-host"}, {"fake-ip", "fake-ip"}, {"跟随配置", ""}} {
 		h.pressLabel(choice.label)

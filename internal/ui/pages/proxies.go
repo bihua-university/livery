@@ -2,6 +2,7 @@ package pages
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +40,10 @@ func Proxies(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 
 			sortLabels := []string{a.Tr("默认", "Default"), a.Tr("延迟", "Latency"), a.Tr("名称", "Name")}
 			components.Segmented(c.Key("px-sort-seg"), p, s, &a.ProxySort, sortLabels)
+			hide := a.SettingsData.HideTimedOutNodes
+			if ui.Checkbox(c.Key("px-hide-timeouts"), &hide, a.Tr("隐藏超时节点", "Hide timed-out nodes")).Disabled(a.SavingPreference).Changed() {
+				a.SavePreference(func(s *model.AppSettings) { s.HideTimedOutNodes = hide }, nil)
+			}
 
 			ui.Spacer(c)
 
@@ -306,14 +311,21 @@ func proxyGroupAccordionCard(c *ui.Context, a *app.App, p theme.Palette, s theme
 }
 
 func filteredSortedNodes(a *app.App, g model.ProxyGroup, q string, includeAllOnGroupMatch bool) []string {
+	members := g.All
+	if a.SettingsData.HideTimedOutNodes {
+		members = slices.DeleteFunc(slices.Clone(members), func(name string) bool {
+			n, ok := a.Nodes[name]
+			return ok && !n.Testing && n.Delay == 0
+		})
+	}
 	if q == "" && a.ProxySort == 0 {
-		return g.All
+		return members
 	}
 	out := make([]string, 0, len(g.All))
 	if q == "" {
-		out = append(out, g.All...)
+		out = append(out, members...)
 	} else {
-		for _, name := range g.All {
+		for _, name := range members {
 			n := a.Nodes[name]
 			if !strings.Contains(strings.ToLower(name), q) && !strings.Contains(strings.ToLower(n.Type), q) {
 				continue
@@ -322,9 +334,9 @@ func filteredSortedNodes(a *app.App, g model.ProxyGroup, q string, includeAllOnG
 		}
 		if len(out) == 0 && includeAllOnGroupMatch {
 			if a.ProxySort == 0 {
-				return g.All
+				return members
 			}
-			out = append(out, g.All...)
+			out = append(out, members...)
 		}
 	}
 	switch a.ProxySort {

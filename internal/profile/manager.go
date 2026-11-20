@@ -90,6 +90,16 @@ func (m *Manager) SaveSettings(s model.AppSettings) error {
 	return m.saveSettingsLocked(s)
 }
 
+// UpdateSettings merges an edit into the latest preferences under the write lock.
+func (m *Manager) UpdateSettings(edit func(*model.AppSettings)) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.settings
+	s.CustomRules = slices.Clone(s.CustomRules)
+	edit(&s)
+	return m.saveSettingsLocked(s)
+}
+
 func (m *Manager) saveSettingsLocked(s model.AppSettings) error {
 	if err := writeJSONAtomic(filepath.Join(m.dataDir, "settings.json"), s); err != nil {
 		return err

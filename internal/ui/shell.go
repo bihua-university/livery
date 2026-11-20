@@ -31,6 +31,9 @@ func View(c *ui.Context, a *app.App) {
 			a.OnWindowShown()
 		}
 		if a.Page != a.PrevPage {
+			if a.PrevPage == app.PageConnections {
+				a.ReleaseConnectionView()
+			}
 			a.PrevPage = a.Page
 			if a.Page == app.PageOverview || a.Page == app.PageProxies || a.Page == app.PageConnections {
 				a.RequestSnapshotSync()

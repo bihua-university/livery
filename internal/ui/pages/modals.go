@@ -256,24 +256,18 @@ func ruleModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 			if components.ActionButton(c, p, s, nil, a.Tr("取消", "Cancel")).Clicked() {
 				a.ShowRuleModal = false
 			}
-			if components.PrimaryActionButton(c, p, s, icons.Plus, a.Tr("添加并应用", "Add & Apply")).Clicked() {
+			if components.PrimaryActionButton(c, p, s, icons.Plus, a.Tr("添加并应用", "Add & Apply")).Disabled(a.SavingPreference).Clicked() {
 				if strings.TrimSpace(a.DraftRulePat) == "" || strings.TrimSpace(a.DraftRuleOut) == "" {
 					a.Notify(a.Tr("请填写匹配内容与目标出站", "Pattern and outbound are required"))
 					return
 				}
-				a.SettingsData.CustomRules = append(a.SettingsData.CustomRules, model.CustomRule{
-					ID:        fmt.Sprintf("cr-%d", len(a.SettingsData.CustomRules)+1),
+				a.AddCustomRule(model.CustomRule{
 					Enabled:   true,
 					MatchType: a.DraftRuleType,
 					Pattern:   strings.TrimSpace(a.DraftRulePat),
 					Outbound:  strings.TrimSpace(a.DraftRuleOut),
 					Prepend:   a.DraftRulePrep,
 				})
-				_ = a.PM.SaveSettings(a.SettingsData)
-				a.ReloadRulesFromActiveProfile()
-				a.ShowRuleModal = false
-				a.Notify(a.Tr("已添加自定义规则", "Custom rule added"))
-				a.ApplyProfileChanges()
 			}
 		})
 	})

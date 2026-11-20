@@ -101,6 +101,9 @@ type App struct {
 	ConnSearch     string
 	ConnPaused     bool
 	ConnTableState ui.ListState
+	ConnSort       ui.SortOrder
+	connRevision   uint64
+	connView       connectionView
 	SelectedConnID string
 	ShowConnModal  bool
 	seenConnByID   map[string]model.Connection
@@ -141,6 +144,7 @@ type App struct {
 	// Profiles UI & Modals
 	pendingClashImports map[string]bool
 	SavingDNSMode       bool
+	SavingPreference    bool
 	ApplyingInbound     bool
 	FlushingDNS         bool
 	networkChanged      atomic.Bool
@@ -181,14 +185,15 @@ type App struct {
 	updateHooks AppUpdateHooks
 
 	// Settings draft buffers
-	SettingsScroll ui.ScrollState
-	ProfilesScroll ui.ScrollState
-	MixedPortDraft string
-	APIPortDraft   string
-	TUNMTUDraft    string
-	UIFontDraft    float64
-	PendingToasts  []string
-	WindowHidden   atomic.Bool
+	SettingsScroll    ui.ScrollState
+	ProfilesScroll    ui.ScrollState
+	MixedPortDraft    string
+	DelayTimeoutDraft string
+	APIPortDraft      string
+	TUNMTUDraft       string
+	UIFontDraft       float64
+	PendingToasts     []string
+	WindowHidden      atomic.Bool
 
 	apiMu           sync.Mutex
 	apiClient       *clashapi.Client
@@ -229,32 +234,33 @@ func New(pm *profile.Manager, cm *core.Manager) *App {
 	logStore, _ := applog.NewStore(filepath.Join(pm.DataDir(), "logs"))
 	s := pm.Settings()
 	a := &App{
-		PM:               pm,
-		CM:               cm,
-		LogStore:         logStore,
-		Page:             PageOverview,
-		PrevPage:         PageOverview,
-		SettingsData:     s,
-		CoreInfo:         cm.Info(),
-		Profiles:         pm.Profiles(),
-		ExpandedGroups:   make(map[string]bool),
-		LogAutoScroll:    true,
-		DraftRuleType:    "domain_suffix",
-		DraftRuleOut:     "direct",
-		DraftRulePrep:    true,
-		MixedPortDraft:   fmt.Sprintf("%d", s.MixedPort),
-		APIPortDraft:     fmt.Sprintf("%d", s.ClashAPIPort),
-		TUNMTUDraft:      fmt.Sprintf("%d", s.TUNMTU),
-		UIFontDraft:      float64(s.UIFontSize),
-		LocalIP:          detectLocalIPv4(),
-		qualityChecker:   diagnostics.New(pm.DataDir()),
-		AppMemoryBytes:   sampleAppMemory(),
-		TrafficHistory:   make([]model.TrafficSample, maxTrafficSamples),
-		ChartXs:          make([]float32, maxTrafficSamples),
-		ChartYsDown:      make([]float32, maxTrafficSamples),
-		ChartYsUp:        make([]float32, maxTrafficSamples),
-		proxyGuardWakeCh: make(chan struct{}, 1),
-		syncWakeCh:       make(chan struct{}, 1),
+		PM:                pm,
+		CM:                cm,
+		LogStore:          logStore,
+		Page:              PageOverview,
+		PrevPage:          PageOverview,
+		SettingsData:      s,
+		CoreInfo:          cm.Info(),
+		Profiles:          pm.Profiles(),
+		ExpandedGroups:    make(map[string]bool),
+		LogAutoScroll:     true,
+		DraftRuleType:     "domain_suffix",
+		DraftRuleOut:      "direct",
+		DraftRulePrep:     true,
+		MixedPortDraft:    fmt.Sprintf("%d", s.MixedPort),
+		DelayTimeoutDraft: fmt.Sprint(s.DelayTestTimeoutMs),
+		APIPortDraft:      fmt.Sprintf("%d", s.ClashAPIPort),
+		TUNMTUDraft:       fmt.Sprintf("%d", s.TUNMTU),
+		UIFontDraft:       float64(s.UIFontSize),
+		LocalIP:           detectLocalIPv4(),
+		qualityChecker:    diagnostics.New(pm.DataDir()),
+		AppMemoryBytes:    sampleAppMemory(),
+		TrafficHistory:    make([]model.TrafficSample, maxTrafficSamples),
+		ChartXs:           make([]float32, maxTrafficSamples),
+		ChartYsDown:       make([]float32, maxTrafficSamples),
+		ChartYsUp:         make([]float32, maxTrafficSamples),
+		proxyGuardWakeCh:  make(chan struct{}, 1),
+		syncWakeCh:        make(chan struct{}, 1),
 	}
 	now := time.Now()
 	for i := range a.TrafficHistory {
@@ -317,6 +323,7 @@ func (a *App) SwitchCoreType(ct model.CoreType) {
 			a.CoreInfo = newInfo
 			a.Groups = nil
 			a.Nodes = nil
+			a.ReleaseConnectionView()
 			a.Conns = nil
 			a.ClosedConns = nil
 			a.seenConnByID = nil
@@ -505,6 +512,7 @@ func (a *App) OnCoreState(info model.CoreInfo) {
 			if info.Status != model.CoreStarting {
 				a.Groups = nil
 				a.Nodes = nil
+				a.ReleaseConnectionView()
 				a.Conns = nil
 				a.ClosedConns = nil
 				a.seenConnByID = nil
@@ -660,6 +668,7 @@ func (a *App) OnWindowClosed() {
 	a.ReleaseEditorState()
 	a.Groups = nil
 	a.Nodes = nil
+	a.ReleaseConnectionView()
 	a.Conns = nil
 	a.ClosedConns = nil
 	a.seenConnByID = nil
@@ -678,6 +687,7 @@ func (a *App) ReleaseHiddenData() {
 	a.stopStreams()
 	a.Groups = nil
 	a.Nodes = nil
+	a.ReleaseConnectionView()
 	a.Conns = nil
 	a.ClosedConns = nil
 	a.seenConnByID = nil
@@ -1241,7 +1251,7 @@ func (a *App) startStreams() {
 			}
 		}
 
-		syncOnce(a.Page == PageProxies || a.Page == PageOverview)
+		syncOnce(a.Page == PageProxies || a.Page == PageOverview || a.Page == PageConnections)
 		ticker := time.NewTicker(1500 * time.Millisecond)
 		defer ticker.Stop()
 		ticks := 0
@@ -1252,7 +1262,7 @@ func (a *App) startStreams() {
 				return
 			case <-a.syncWakeCh:
 				if !a.WindowHidden.Load() {
-					includeProxies := a.Page == PageProxies || a.Page == PageOverview
+					includeProxies := a.Page == PageProxies || a.Page == PageOverview || a.Page == PageConnections
 					syncOnce(includeProxies)
 				}
 			case <-ticker.C:
@@ -1378,6 +1388,7 @@ func (a *App) appendTrafficHistory(sample model.TrafficSample) {
 }
 
 func (a *App) reconcileConnections(active []model.Connection) {
+	a.connRevision++
 	if a.connActiveSet == nil {
 		a.connActiveSet = make(map[string]struct{}, len(active))
 	} else {
@@ -1717,8 +1728,9 @@ func (a *App) TestNodeDelay(name string) {
 		n.Testing = true
 		a.Nodes[name] = n
 	}
+	client, url, timeout := a.APIClient(), a.SettingsData.DelayTestURL, a.SettingsData.DelayTestTimeoutMs
 	go func() {
-		d, err := a.APIClient().TestDelay(context.Background(), name, a.SettingsData.DelayTestURL, a.SettingsData.DelayTestTimeoutMs)
+		d, err := client.TestDelay(context.Background(), name, url, timeout)
 		a.UpdateUI(func() {
 			if n, ok := a.Nodes[name]; ok {
 				n.Testing = false
@@ -1747,8 +1759,9 @@ func (a *App) TestGroupDelay(groupName string) {
 			break
 		}
 	}
+	client, url, timeout := a.APIClient(), a.SettingsData.DelayTestURL, a.SettingsData.DelayTestTimeoutMs
 	go func() {
-		delays, err := a.APIClient().TestGroupDelay(context.Background(), groupName, a.SettingsData.DelayTestURL, a.SettingsData.DelayTestTimeoutMs)
+		delays, err := client.TestGroupDelay(context.Background(), groupName, url, timeout)
 		a.UpdateUI(func() {
 			for i := range a.Groups {
 				if a.Groups[i].Name == groupName {
@@ -2053,6 +2066,29 @@ func (a *App) FindProfile(id string) (model.Profile, bool) {
 		}
 	}
 	return model.Profile{}, false
+}
+
+// SavePreference applies the same field edit to disk and the UI, preserving
+// unrelated settings that change while the write is in progress.
+func (a *App) SavePreference(edit func(*model.AppSettings), applied func()) {
+	if a.SavingPreference {
+		return
+	}
+	a.SavingPreference = true
+	go func() {
+		err := a.PM.UpdateSettings(edit)
+		a.UpdateUI(func() {
+			a.SavingPreference = false
+			if err != nil {
+				a.Notify(a.Tr("保存设置失败：", "Could not save settings: ") + err.Error())
+				return
+			}
+			edit(&a.SettingsData)
+			if applied != nil {
+				applied()
+			}
+		})
+	}()
 }
 
 // ApplySettings persists SettingsData and optionally restarts the core.

@@ -68,12 +68,13 @@ const (
 
 // CustomRule defines a user-managed routing rule injected into the compiled sing-box config.
 type CustomRule struct {
-	ID        string `json:"id"`
-	Enabled   bool   `json:"enabled"`
-	MatchType string `json:"match_type"` // domain_suffix, domain_keyword, domain, ip_cidr, process_name
-	Pattern   string `json:"pattern"`
-	Outbound  string `json:"outbound"` // proxy, direct, block, or custom tag
-	Prepend   bool   `json:"prepend"`
+	ID             string `json:"id"`
+	Enabled        bool   `json:"enabled"`
+	MatchType      string `json:"match_type"` // domain_suffix, domain_keyword, domain, ip_cidr, process_name
+	Pattern        string `json:"pattern"`
+	Outbound       string `json:"outbound"` // proxy, direct, block, or custom tag
+	Prepend        bool   `json:"prepend"`
+	FromConnection bool   `json:"from_connection,omitempty"`
 }
 
 // ProfileOverride holds Clash-Verge-style per-profile override options.
@@ -118,14 +119,18 @@ type AppSettings struct {
 	CorePath           string   `json:"core_path"`   // sing-box binary path
 	MihomoPath         string   `json:"mihomo_path"` // mihomo binary path
 	AutoStartCore      bool     `json:"auto_start_core"`
-	ClashAPIHost       string `json:"clash_api_host"`
-	ClashAPIPort       int    `json:"clash_api_port"`
-	ClashAPISecret     string `json:"clash_api_secret"`
-	MixedPort          int    `json:"mixed_port"`
-	AllowLAN           bool   `json:"allow_lan"`
-	LogLevel           string `json:"log_level"`
-	DelayTestURL       string `json:"delay_test_url"`
-	DelayTestTimeoutMs int    `json:"delay_test_timeout_ms"`
+	ClashAPIHost       string   `json:"clash_api_host"`
+	ClashAPIPort       int      `json:"clash_api_port"`
+	ClashAPISecret     string   `json:"clash_api_secret"`
+	MixedPort          int      `json:"mixed_port"`
+	AllowLAN           bool     `json:"allow_lan"`
+	LogLevel           string   `json:"log_level"`
+	DelayTestURL       string   `json:"delay_test_url"`
+	DelayTestTimeoutMs int      `json:"delay_test_timeout_ms"`
+	HideTimedOutNodes  bool     `json:"hide_timed_out_nodes,omitempty"`
+	TCPConcurrent      *bool    `json:"tcp_concurrent,omitempty"`
+	IPv6               *bool    `json:"ipv6,omitempty"`
+	GeoDataLoader      string   `json:"geodata_loader,omitempty"`
 
 	// Routing & system proxy
 	CloseConnectionsOnSwitch bool `json:"close_connections_on_switch"`

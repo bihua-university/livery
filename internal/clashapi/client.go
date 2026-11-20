@@ -295,6 +295,7 @@ type rawProxy struct {
 	Now     string   `json:"now"`
 	All     []string `json:"all"`
 	UDP     bool     `json:"udp"`
+	Alive   *bool    `json:"alive"`
 	History []struct {
 		Delay int `json:"delay"`
 	} `json:"history"`
@@ -320,6 +321,9 @@ func (c *Client) GetProxies(ctx context.Context) ([]model.ProxyGroup, map[string
 		delay := -1
 		if len(raw.History) > 0 {
 			delay = raw.History[len(raw.History)-1].Delay
+		}
+		if raw.Alive != nil && !*raw.Alive {
+			delay = 0
 		}
 		nodeName := raw.Name
 		if nodeName == "" {
@@ -385,6 +389,12 @@ func (c *Client) SelectProxy(ctx context.Context, group, target string) error {
 	return decodeJSON(resp, nil)
 }
 
+// A latency test can run longer than the client's ordinary REST timeout.
+func (c *Client) delayRequest(ctx context.Context, path string, timeout time.Duration) (*http.Response, error) {
+	client := &http.Client{Transport: c.http.Transport, Timeout: timeout}
+	return c.request(ctx, client, http.MethodGet, path, nil)
+}
+
 // TestDelay measures latency (ms) of a single proxy node.
 func (c *Client) TestDelay(ctx context.Context, proxyName, testURL string, timeoutMs int) (int, error) {
 	if testURL == "" {
@@ -398,10 +408,7 @@ func (c *Client) TestDelay(ctx context.Context, proxyName, testURL string, timeo
 	q.Set("timeout", fmt.Sprintf("%d", timeoutMs))
 	path := "/proxies/" + url.PathEscape(proxyName) + "/delay?" + q.Encode()
 
-	callCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs+2000)*time.Millisecond)
-	defer cancel()
-
-	resp, err := c.do(callCtx, http.MethodGet, path, nil)
+	resp, err := c.delayRequest(ctx, path, time.Duration(timeoutMs)*time.Millisecond+2*time.Second)
 	if err != nil {
 		return 0, err
 	}
@@ -427,10 +434,7 @@ func (c *Client) TestGroupDelay(ctx context.Context, groupName, testURL string, 
 	q.Set("timeout", fmt.Sprintf("%d", timeoutMs))
 	path := "/group/" + url.PathEscape(groupName) + "/delay?" + q.Encode()
 
-	callCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs+3000)*time.Millisecond)
-	defer cancel()
-
-	resp, err := c.do(callCtx, http.MethodGet, path, nil)
+	resp, err := c.delayRequest(ctx, path, time.Duration(timeoutMs)*time.Millisecond+3*time.Second)
 	if err != nil {
 		return nil, err
 	}

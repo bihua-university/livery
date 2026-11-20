@@ -16,6 +16,60 @@ import (
 	"github.com/bihua-university/livery/internal/model"
 )
 
+func TestMihomoCoreOptionOverrides(t *testing.T) {
+	raw := []byte("proxies: []\nipv6: true\ntcp-concurrent: false\ngeodata-loader: standard\n")
+	on, off := true, false
+	for _, tc := range []struct {
+		settings model.AppSettings
+		v6, tcp  bool
+		loader   string
+	}{
+		{model.DefaultSettings(), true, false, "standard"},
+		{model.AppSettings{IPv6: &off, TCPConcurrent: &on, GeoDataLoader: "memconservative"}, false, true, "memconservative"},
+	} {
+		out, err := CompileMihomo(raw, model.Profile{}, tc.settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]any
+		if err := yaml.Unmarshal(out, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg["ipv6"] != tc.v6 || cfg["tcp-concurrent"] != tc.tcp || cfg["geodata-loader"] != tc.loader {
+			t.Fatalf("unexpected options: %s", out)
+		}
+	}
+}
+
+func TestConnectionRulesUseAvailableOutbounds(t *testing.T) {
+	s := model.DefaultSettings()
+	for _, target := range []string{"direct", "LocalGroup", "OtherGroup"} {
+		s.CustomRules = append(s.CustomRules, model.CustomRule{Enabled: true, Prepend: true, FromConnection: true, MatchType: "domain", Pattern: strings.ToLower(target) + ".example", Outbound: target})
+	}
+	clash, err := CompileMihomo([]byte("proxies: []\nproxy-groups: [{name: LocalGroup, type: select, proxies: [DIRECT]}]\n"), model.Profile{}, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(clash); !strings.Contains(got, "DOMAIN,localgroup.example,LocalGroup") || strings.Contains(got, "othergroup.example") {
+		t.Fatalf("unexpected Mihomo rules: %s", clash)
+	}
+	for _, outbounds := range []string{`[{"type":"direct","tag":"local-direct"}]`, `[]`} {
+		data, err := Compile([]byte(`{"outbounds":`+outbounds+`}`), model.Profile{}, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		rules := cfg["route"].(map[string]any)["rules"].([]any)
+		direct := rules[0].(map[string]any)
+		if tag := findSingBoxDirectTag(cfg); tag == "" || direct["outbound"] != tag || strings.Contains(string(data), "othergroup.example") {
+			t.Fatalf("unexpected sing-box routing: %s", data)
+		}
+	}
+}
+
 func TestMihomoDNSModeOverride(t *testing.T) {
 	for _, tun := range []bool{false, true} {
 		settings := model.DefaultSettings()

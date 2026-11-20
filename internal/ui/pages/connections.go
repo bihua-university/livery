@@ -57,7 +57,7 @@ func Connections(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 			}
 		})
 
-		list := filteredConnections(a)
+		list := a.ConnectionRows()
 
 		tableTheme := theme.BuildTableTheme(p, c.Theme())
 
@@ -72,13 +72,13 @@ func Connections(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 			}
 
 			cols := []ui.TableColumn{
-				{Title: a.Tr("目标地址", "Host"), MinWidth: 150},
-				{Title: a.Tr("类型", "Type"), Width: 96},
-				{Title: a.Tr("规则", "Rule"), Width: 150},
-				{Title: a.Tr("节点链", "Chains"), Width: 170},
-				{Title: a.Tr("下行", "Down"), Width: 88, Align: ui.End},
-				{Title: a.Tr("上行", "Up"), Width: 88, Align: ui.End},
-				{Title: a.Tr("时长", "Time"), Width: 90, Align: ui.End},
+				{ID: "host", Sortable: true, Title: a.Tr("目标地址", "Host"), MinWidth: 150},
+				{ID: "type", Sortable: true, Title: a.Tr("类型", "Type"), Width: 96},
+				{ID: "rule", Sortable: true, Title: a.Tr("规则", "Rule"), Width: 150},
+				{ID: "chains", Sortable: true, Title: a.Tr("节点链", "Chains"), Width: 170},
+				{ID: "down", Sortable: true, Title: a.Tr("下行", "Down"), Width: 88, Align: ui.End},
+				{ID: "up", Sortable: true, Title: a.Tr("上行", "Up"), Width: 88, Align: ui.End},
+				{ID: "duration", Sortable: true, Title: a.Tr("时长", "Time"), Width: 90, Align: ui.End},
 			}
 			selIdx := -1
 			for i, item := range list {
@@ -87,6 +87,7 @@ func Connections(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 					break
 				}
 			}
+			a.ConnTableState.Sort = &a.ConnSort
 			a.ConnTableState.Selected = &selIdx
 			a.ConnTableState.RowHeight = 32
 			a.ConnTableState.CellsStyle = ui.CellsStyle{
@@ -98,14 +99,10 @@ func Connections(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 				conn := list[row]
 				switch col {
 				case 0:
-					host := conn.Metadata.Host
-					if host == "" {
-						host = conn.Metadata.DestinationIP
-					}
-					if conn.Metadata.DestinationPort != "" {
-						host = host + ":" + conn.Metadata.DestinationPort
-					}
-					ui.Text(c, host).FontSize(s.SM).Font(theme.MonoFont()).TextColor(p.Foreground).SingleLine()
+					ui.Row(c).AlignItems(ui.Center).Gap(4).FillWidth().Children(func() {
+						connectionRuleButton(c, a, p, conn)
+						ui.Text(c, app.ConnectionAddress(conn)).Grow(1).MinWidth(0).FontSize(s.SM).Font(theme.MonoFont()).TextColor(p.Foreground).SingleLine()
+					})
 				case 1:
 					typ := strings.ToUpper(conn.Metadata.Network)
 					if conn.Metadata.Type != "" {
@@ -142,28 +139,29 @@ func Connections(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 	})
 }
 
-func filteredConnections(a *app.App) []model.Connection {
-	src := a.Conns
-	if a.ConnFilterTab == 1 {
-		src = a.ClosedConns
-	}
-	q := strings.ToLower(strings.TrimSpace(a.ConnSearch))
-	if q == "" {
-		return src
-	}
-	var out []model.Connection
-	for _, item := range src {
-		hay := strings.ToLower(strings.Join([]string{
-			item.Metadata.Host,
-			item.Metadata.DestinationIP,
-			item.Metadata.ProcessPath,
-			item.Rule,
-			item.RulePayload,
-			strings.Join(item.Chains, " "),
-		}, " "))
-		if strings.Contains(hay, q) {
-			out = append(out, item)
-		}
-	}
-	return out
+func connectionRuleButton(c *ui.Context, a *app.App, p theme.Palette, conn model.Connection) {
+	kind, pattern := app.ConnectionRuleTarget(conn.Metadata)
+	label := a.Tr("添加规则", "Add rule")
+	components.IconActionButton(c.Key("conn-rule-"+conn.ID), p, icons.Plus, label).Disabled(pattern == "" || a.SavingPreference).
+		PopoverMenuButton(func(m *ui.Menu) {
+			add := func(out string) {
+				a.AddCustomRule(model.CustomRule{Enabled: true, Prepend: true, FromConnection: true, MatchType: kind, Pattern: pattern, Outbound: out})
+			}
+			m.Item(pattern).Disabled(true)
+			m.Separator()
+			if m.Item(a.Tr("直连", "Direct")).Chosen() {
+				add("direct")
+			}
+			for _, g := range a.OrderedGroups() {
+				if strings.ContainsAny(g.Name, ",\r\n") || (a.CoreInfo.CoreType == model.CoreSingBox && g.Name == "GLOBAL") {
+					continue
+				}
+				if m.Item(a.Tr("代理", "Proxy") + " · " + g.Name).Chosen() {
+					add(g.Name)
+				}
+			}
+			if m.Item(a.Tr("拦截", "Block")).Chosen() {
+				add("block")
+			}
+		})
 }
