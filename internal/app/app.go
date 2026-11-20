@@ -140,6 +140,7 @@ type App struct {
 
 	// Profiles UI & Modals
 	pendingClashImports map[string]bool
+	SavingDNSMode       bool
 	ShowImportModal     bool
 	ImportURL           string
 	ImportName          string
@@ -2057,6 +2058,33 @@ func (a *App) ApplySettings(restartIfRunning bool) {
 	}
 }
 
+// SetDNSMode applies a per-profile override to Livery-managed Mihomo configurations.
+func (a *App) SetDNSMode(id, mode string) {
+	if a.SavingDNSMode || a.IsCoreBusy() {
+		return
+	}
+	a.SavingDNSMode = true
+	go func() {
+		err := a.PM.SetDNSMode(id, mode)
+		a.UpdateUI(func() {
+			a.SavingDNSMode = false
+			if err != nil {
+				a.Notify(a.Tr("保存 DNS 模式失败：", "Could not save DNS mode: ") + err.Error())
+				return
+			}
+			a.Profiles = a.PM.Profiles()
+			if a.SettingsData.ActiveProfileID != id || model.NormalizeCoreType(a.SettingsData.CoreType) != model.CoreMihomo || a.CoreInfo.Status != model.CoreRunning {
+				return
+			}
+			if a.CoreInfo.External {
+				a.Notify(a.Tr("DNS 模式已保存，下次由 Livery 启动核心时生效", "DNS mode saved for the next Livery-managed start"))
+				return
+			}
+			go a.RestartCore()
+		})
+	}()
+}
+
 // StartInstallCore downloads the latest release binary for the active core in the background.
 // When a custom core path or directory is configured, it downloads directly to that location.
 func (a *App) StartInstallCore() {
@@ -2286,4 +2314,3 @@ func (a *App) SetUpdatePrereleases(on bool) {
 		a.updateHooks.SetPrereleases(on)
 	}
 }
-

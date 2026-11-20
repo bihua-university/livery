@@ -16,6 +16,40 @@ import (
 	"github.com/bihua-university/livery/internal/model"
 )
 
+func TestMihomoDNSModeOverride(t *testing.T) {
+	for _, tun := range []bool{false, true} {
+		settings := model.DefaultSettings()
+		settings.TUNEnabled = tun
+		for _, mode := range []string{"", "redir-host", "fake-ip"} {
+			raw := []byte("proxies: []\nrules: [MATCH]\ndns:\n  enable: false\n  enhanced-mode: redir-host\n  nameserver: [192.0.2.53]\n  respect-rules: true\n")
+			prof := model.Profile{Override: model.ProfileOverride{DNSMode: mode}}
+			out, err := CompileMihomo(raw, prof, settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config struct {
+				DNS struct {
+					Enable       bool
+					Mode         string `yaml:"enhanced-mode"`
+					Nameserver   []string
+					RespectRules bool `yaml:"respect-rules"`
+				}
+			}
+			if err := yaml.Unmarshal(out, &config); err != nil {
+				t.Fatal(err)
+			}
+			wantMode := mode
+			if mode == "" {
+				wantMode = "redir-host"
+			}
+			dns := config.DNS
+			if dns.Mode != wantMode || dns.Enable != (tun || mode != "") || len(dns.Nameserver) != 1 || dns.Nameserver[0] != "192.0.2.53" || !dns.RespectRules {
+				t.Fatalf("tun=%v mode=%q: %+v", tun, mode, dns)
+			}
+		}
+	}
+}
+
 func TestParseClashInstallURL(t *testing.T) {
 	target, name, ok := ParseClashInstallURL("CLASH://INSTALL-CONFIG/?url=https%3A%2F%2Fexample.org%2Fs%3Fk%3Da%252Bb%26v%3D1&name=My+Profile")
 	if !ok || target != "https://example.org/s?k=a%2Bb&v=1" || name != "My Profile" {

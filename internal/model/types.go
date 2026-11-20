@@ -78,6 +78,7 @@ type CustomRule struct {
 
 // ProfileOverride holds Clash-Verge-style per-profile override options.
 type ProfileOverride struct {
+	DNSMode          string `json:"dns_mode,omitempty"` // Empty inherits the profile's Mihomo DNS configuration.
 	OverrideInbounds bool   `json:"override_inbounds"`
 	InjectClashAPI   bool   `json:"inject_clash_api"`
 	OverrideLog      bool   `json:"override_log"`

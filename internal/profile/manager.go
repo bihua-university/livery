@@ -205,6 +205,28 @@ func (m *Manager) UpdateProfileMeta(updated model.Profile) error {
 	return fmt.Errorf("profile %q not found", updated.ID)
 }
 
+// SetDNSMode persists just the selected profile's Mihomo DNS override.
+func (m *Manager) SetDNSMode(id, mode string) error {
+	if mode != "" && mode != "fake-ip" && mode != "redir-host" {
+		return fmt.Errorf("unknown DNS mode %q", mode)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.profiles {
+		p := &m.profiles[i]
+		if p.ID == id {
+			old := p.Override.DNSMode
+			p.Override.DNSMode = mode
+			if err := m.saveProfilesLocked(); err != nil {
+				p.Override.DNSMode = old
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("profile %q not found", id)
+}
+
 // CreateBlank creates a new valid starter profile matching the active core mode.
 func (m *Manager) CreateBlank(name string) (model.Profile, error) {
 	if strings.TrimSpace(name) == "" {

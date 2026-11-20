@@ -3,6 +3,7 @@ package pages
 import (
 	"fmt"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -101,6 +102,21 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				if ui.Checkbox(c.Key("set-close-connections-on-switch"), &a.SettingsData.CloseConnectionsOnSwitch,
 					a.Tr("切换节点成功后断开所有活动连接", "Close all active connections after switching nodes")).Changed() {
 					a.ApplySettings(false)
+				}
+
+				if prof, ok := a.PM.ActiveProfile(); coreType == model.CoreMihomo && ok {
+					ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+						ui.Column(c).Grow(1).MinWidth(0).Children(func() {
+							ui.Text(c, a.Tr("DNS 增强模式", "DNS enhanced mode")).FontSize(s.Base).TextColor(p.Foreground)
+							ui.Text(c, prof.Name).SingleLine().FontSize(s.XS).TextColor(p.ForegroundSubtle)
+						})
+						modes := []string{"", "fake-ip", "redir-host"}
+						idx := max(0, slices.Index(modes, prof.Override.DNSMode))
+						labels := []string{a.Tr("跟随配置", "Use profile"), "fake-ip", "redir-host"}
+						if components.Segmented(c.Key("set-dns-mode-"+prof.ID), p, s, &idx, labels).Disabled(a.SavingDNSMode || a.IsCoreBusy()).Changed() {
+							a.SetDNSMode(prof.ID, modes[idx])
+						}
+					})
 				}
 
 				ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {

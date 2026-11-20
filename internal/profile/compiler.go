@@ -150,24 +150,31 @@ func CompileMihomo(raw []byte, prof model.Profile, settings model.AppSettings) (
 		excludes = appendUniqueStrings(excludes, tailscaleRouteExcludeAddresses...)
 		tunObj["route-exclude-address"] = excludes
 		cfg["tun"] = tunObj
-
-		dnsObj, _ := cfg["dns"].(map[string]any)
-		if dnsObj == nil {
-			dnsObj = defaultMihomoDNSMap()
-		} else {
-			dnsObj["enable"] = true
-		}
-		ensureMihomoTailscaleDNS(dnsObj)
-		cfg["dns"] = dnsObj
 	} else {
 		if tunObj, ok := cfg["tun"].(map[string]any); ok && tunObj != nil {
 			tunObj["enable"] = false
 			cfg["tun"] = tunObj
 		}
-		if dnsObj, ok := cfg["dns"].(map[string]any); ok && dnsObj != nil && boolVal(dnsObj["enable"]) {
-			ensureMihomoTailscaleDNS(dnsObj)
-			cfg["dns"] = dnsObj
+	}
+
+	mode := prof.Override.DNSMode
+	overrideDNS := mode == "fake-ip" || mode == "redir-host"
+	dns, _ := cfg["dns"].(map[string]any)
+	if settings.TUNEnabled || overrideDNS {
+		if dns == nil {
+			dns = defaultMihomoDNSMap()
+			cfg["dns"] = dns
 		}
+		dns["enable"] = true
+	}
+	if overrideDNS {
+		dns["enhanced-mode"] = mode
+		if len(strSlice(dns["nameserver"])) == 0 {
+			dns["nameserver"] = defaultMihomoDNSMap()["nameserver"]
+		}
+	}
+	if boolVal(dns["enable"]) {
+		ensureMihomoTailscaleDNS(dns)
 	}
 
 	// 5b. GeoIP / GeoSite database settings.
@@ -290,9 +297,13 @@ func ensureMihomoTailscaleDNS(dnsObj map[string]any) {
 	if dnsObj == nil {
 		return
 	}
-	filters := strSlice(dnsObj["fake-ip-filter"])
-	filters = appendUniqueStrings(filters, append([]string{"+.ts.net"}, microsoftNCSIFakeIPFilters...)...)
-	dnsObj["fake-ip-filter"] = filters
+	// These bypass domains are blacklist entries. A whitelist reverses their
+	// meaning, and a rule-mode filter requires full routing rules.
+	switch strings.ToLower(strVal(dnsObj["fake-ip-filter-mode"])) {
+	case "", "blacklist":
+		filters := strSlice(dnsObj["fake-ip-filter"])
+		dnsObj["fake-ip-filter"] = appendUniqueStrings(filters, append([]string{"+.ts.net"}, microsoftNCSIFakeIPFilters...)...)
+	}
 
 	policy, _ := dnsObj["nameserver-policy"].(map[string]any)
 	if policy == nil {

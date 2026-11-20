@@ -830,6 +830,22 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 
 	// 5. Settings page: switch language to English and theme to Dark, verify persistence.
 	h.pressKey("nav-settings")
+	for _, choice := range []struct{ label, mode string }{{"redir-host", "redir-host"}, {"fake-ip", "fake-ip"}, {"跟随配置", ""}} {
+		h.pressLabel(choice.label)
+		h.waitUntil(5*time.Second, "persisted DNS mode "+choice.label, func(_ []autoNode) bool {
+			b, err := os.ReadFile(filepath.Join(h.dataDir, "profiles.json"))
+			var profiles []model.Profile
+			if err != nil || json.Unmarshal(b, &profiles) != nil {
+				return false
+			}
+			for _, p := range profiles {
+				if p.ID == s.ActiveProfileID {
+					return p.Override.DNSMode == choice.mode
+				}
+			}
+			return false
+		})
+	}
 	h.pressLabel("English")
 	h.waitUntil(5*time.Second, "English settings heading", func(nodes []autoNode) bool {
 		return hasNodeText(nodes, "Appearance & Behavior")
