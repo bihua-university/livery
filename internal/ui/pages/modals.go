@@ -26,6 +26,7 @@ func Modals(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 	metaModal(c, a, p, s)
 	ruleModal(c, a, p, s)
 	connDetailModal(c, a, p, s)
+	qualityModal(c, a, p, s)
 
 	btn := ui.AlertDialog(c, &a.ShowDeleteAlert,
 		a.Tr("删除配置", "Delete Profile"),

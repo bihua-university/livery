@@ -24,6 +24,7 @@ import (
 	"github.com/bihua-university/livery/internal/applog"
 	"github.com/bihua-university/livery/internal/clashapi"
 	"github.com/bihua-university/livery/internal/core"
+	"github.com/bihua-university/livery/internal/diagnostics"
 	"github.com/bihua-university/livery/internal/model"
 	"github.com/bihua-university/livery/internal/profile"
 	"github.com/bihua-university/livery/internal/sysproxy"
@@ -79,6 +80,11 @@ type App struct {
 	ChartPtsDown   [][2]float32
 	ChartPtsUp     [][2]float32
 	ChartSlopes    []float32
+
+	ShowQualityModal bool
+	QualityReport    diagnostics.Report
+	qualityChecker   *diagnostics.Checker
+	qualityCancel    context.CancelFunc
 
 	Groups          []model.ProxyGroup
 	Nodes           map[string]model.ProxyNode
@@ -236,6 +242,7 @@ func New(pm *profile.Manager, cm *core.Manager) *App {
 		TUNMTUDraft:      fmt.Sprintf("%d", s.TUNMTU),
 		UIFontDraft:      float64(s.UIFontSize),
 		LocalIP:          detectLocalIPv4(),
+		qualityChecker:   diagnostics.New(pm.DataDir()),
 		AppMemoryBytes:   sampleAppMemory(),
 		TrafficHistory:   make([]model.TrafficSample, maxTrafficSamples),
 		ChartXs:          make([]float32, maxTrafficSamples),
@@ -474,6 +481,9 @@ func (a *App) OnCoreState(info model.CoreInfo) {
 		a.bgMu.Unlock()
 	}
 	a.UpdateUI(func() {
+		if info.Status != model.CoreRunning || info.StartedAt != a.CoreInfo.StartedAt {
+			a.resetQuality()
+		}
 		a.CoreInfo = info
 		if info.Status == model.CoreRunning {
 			if a.CoreStartedAt.IsZero() {
@@ -635,6 +645,7 @@ func (a *App) OnWindowShown() {
 
 // OnWindowClosed detaches the closed window, stops UI telemetry streams, drops transient UI data, and trims unused OS memory.
 func (a *App) OnWindowClosed() {
+	a.resetQuality()
 	a.win = nil
 	a.WindowHidden.Store(true)
 	a.SetOverviewVisible(false)
@@ -657,6 +668,8 @@ func (a *App) OnWindowClosed() {
 
 // ReleaseHiddenData stops UI telemetry streams, drops transient proxy/connection state when hidden to tray, and returns freed memory to OS.
 func (a *App) ReleaseHiddenData() {
+	a.resetQuality()
+	a.ShowQualityModal = false
 	a.stopStreams()
 	a.Groups = nil
 	a.Nodes = nil
@@ -1583,6 +1596,9 @@ func (a *App) SetTUNMode(enable bool) {
 
 // SetProxyMode updates proxy mode (rule/global/direct) via Clash API & settings.
 func (a *App) SetProxyMode(mode model.ProxyMode) {
+	if mode != a.SettingsData.ProxyMode {
+		a.resetQuality()
+	}
 	a.SettingsData.ProxyMode = mode
 	sortGroups(a.Groups, mode)
 	_ = a.PM.SaveSettings(a.SettingsData)
@@ -1631,6 +1647,7 @@ func (a *App) SelectProxy(group, target string) {
 				return
 			}
 			closeConnections = a.SettingsData.CloseConnectionsOnSwitch
+			a.resetQuality()
 			a.Groups[i].Now = target
 			break
 		}
@@ -1765,6 +1782,11 @@ func (a *App) ReloadRulesFromActiveProfile() {
 // SetGroups replaces and pre-sorts the active proxy groups slice.
 func (a *App) SetGroups(groups []model.ProxyGroup) {
 	sortGroups(groups, a.SettingsData.ProxyMode)
+	if len(a.Groups) > 0 && (a.QualityChecking() || !a.QualityReport.CheckedAt.IsZero()) && !slices.EqualFunc(a.Groups, groups, func(old, next model.ProxyGroup) bool {
+		return old.Name == next.Name && old.Now == next.Now
+	}) {
+		a.resetQuality()
+	}
 	a.Groups = groups
 	if a.SelectedGroup == "" && len(a.Groups) > 0 {
 		a.SelectedGroup = a.Groups[0].Name

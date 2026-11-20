@@ -144,6 +144,44 @@ func (c *Client) GetMode(ctx context.Context) (model.ProxyMode, error) {
 	return model.ProxyMode(strings.ToLower(res.Mode)), nil
 }
 
+// ProxyURL returns the inbound address on the controller's host. Mihomo
+// reports active listeners, including ports preserved from imported profiles.
+func (c *Client) ProxyURL(ctx context.Context, coreType model.CoreType, configuredPort int) (*url.URL, error) {
+	endpoint, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, err
+	}
+	scheme, port := "http", configuredPort
+	if model.NormalizeCoreType(coreType) == model.CoreMihomo {
+		resp, err := c.do(ctx, http.MethodGet, "/configs", nil)
+		if err != nil {
+			return nil, err
+		}
+		var config struct {
+			Mixed *int `json:"mixed-port"`
+			HTTP  *int `json:"port"`
+			SOCKS *int `json:"socks-port"`
+		}
+		if err := decodeJSON(resp, &config); err != nil {
+			return nil, err
+		}
+		switch {
+		case config.Mixed != nil && *config.Mixed > 0:
+			port = *config.Mixed
+		case config.HTTP != nil && *config.HTTP > 0:
+			port = *config.HTTP
+		case config.SOCKS != nil && *config.SOCKS > 0:
+			scheme, port = "socks5", *config.SOCKS
+		case config.Mixed != nil || config.HTTP != nil || config.SOCKS != nil:
+			port = 0
+		}
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("no active HTTP, mixed or SOCKS proxy port")
+	}
+	return &url.URL{Scheme: scheme, Host: net.JoinHostPort(endpoint.Hostname(), fmt.Sprint(port))}, nil
+}
+
 // SetMode changes the active proxy mode via PATCH /configs.
 func (c *Client) SetMode(ctx context.Context, mode model.ProxyMode) error {
 	resp, err := c.do(ctx, http.MethodPatch, "/configs", map[string]string{"mode": string(mode)})
@@ -466,4 +504,3 @@ func (c *Client) StreamMemory(ctx context.Context, onMemory func(int64)) error {
 	}
 	return scanner.Err()
 }
-

@@ -239,6 +239,10 @@ func overviewInfoTrio(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeSc
 		// 1. Local IP & LAN Proxy
 		components.Card(c, p, func() {
 			components.SectionHeader(c, p, s, a.Tr("内网 IP", "Local IP"), func() {
+				if components.ActionButton(c.Key("ov-check-quality"), p, s, icons.Zap, a.Tr("节点质量检测", "Check egress")).Disabled(a.CoreInfo.Status != model.CoreRunning || a.IsCoreBusy()).Clicked() {
+					a.ShowQualityModal = true
+					a.CheckQuality()
+				}
 				if components.IconActionButton(c, p, icons.Copy, a.Tr("复制内网 IP", "Copy Local IP")).Clicked() {
 					mygo.Clipboard.WriteText(a.LocalIP)
 					a.Notify(a.Tr("已复制 ", "Copied ") + a.LocalIP)

@@ -665,6 +665,12 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 			hasNodeText(nodes, "核心 50.95 MB")
 	})
 
+	h.pressKey("ov-check-quality")
+	h.waitUntil(5*time.Second, "quality check reports the mock proxy refusal", func(nodes []autoNode) bool {
+		return hasNodeText(nodes, "出口信息查询失败") && hasNodeText(nodes, "ChatGPT") && hasNodeText(nodes, "未收到响应")
+	})
+	h.pressKey("quality-close")
+
 	// Switch proxy mode on Overview and verify PATCH /configs hits mock Mihomo.
 	h.pressLabel("全局")
 	deadline := time.Now().Add(5 * time.Second)

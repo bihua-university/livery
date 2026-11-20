@@ -95,6 +95,28 @@ func TestClientProxiesAndSelection(t *testing.T) {
 	}
 }
 
+func TestProxyURLUsesControllerListener(t *testing.T) {
+	for _, tc := range []struct{ config, want string }{
+		{`{"mixed-port":8123,"port":8124}`, "http://127.0.0.1:8123"},
+		{`{"mixed-port":0,"port":8124}`, "http://127.0.0.1:8124"},
+		{`{"socks-port":8125}`, "socks5://127.0.0.1:8125"},
+		{`{"mixed-port":0,"port":0,"socks-port":0}`, ""},
+	} {
+		t.Run(tc.config, func(t *testing.T) {
+			client, closeServer := newMockClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, tc.config) }))
+			defer closeServer()
+			got, err := client.ProxyURL(context.Background(), model.CoreMihomo, 7890)
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("unexpected fallback: %s", got)
+				}
+			} else if err != nil || got.String() != tc.want {
+				t.Fatalf("got %v, %v; want %s", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestClientModeAndRules(t *testing.T) {
 	mode := model.ModeRule
 	mux := http.NewServeMux()
@@ -194,4 +216,3 @@ func TestClientStreamMemory(t *testing.T) {
 		t.Fatalf("expected ErrUnsupported on 404, got %v", err)
 	}
 }
-

@@ -16,6 +16,27 @@ import (
 	"github.com/bihua-university/livery/internal/model"
 )
 
+func TestSingBoxProxyURLUsesProfileInbound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	for _, tc := range []struct{ raw, want string }{
+		{`{"inbounds":[{"type":"tun"}]}`, ""},
+		{`{"inbounds":[{"type":"tun"},{"type":"socks","listen":"::","listen_port":11999}]}`, "socks5://[::1]:11999"},
+		{`{"inbounds":[{"type":"mixed","listen_port":12000,"users":[{"username":"test","password":"fixture"}]}]}`, "http://test:fixture@127.0.0.1:12000"},
+	} {
+		if err := os.WriteFile(path, []byte(tc.raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := SingBoxProxyURL(path)
+		if tc.want == "" {
+			if err == nil {
+				t.Fatal("used unrelated inbound for TUN-only profile")
+			}
+		} else if err != nil || got.String() != tc.want {
+			t.Fatalf("got %v, %v; want %s", got, err, tc.want)
+		}
+	}
+}
+
 func TestCompileInjectsClashAPITUNAndCustomRules(t *testing.T) {
 	settings := model.DefaultSettings()
 	settings.MixedPort = 17890
@@ -565,4 +586,3 @@ rules:
 		t.Fatalf("expected custom and Tailscale CIDRs preserved, got %v", excludesNoPriv)
 	}
 }
-
