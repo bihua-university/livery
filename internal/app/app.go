@@ -139,6 +139,7 @@ type App struct {
 	logsLoadGen      uint64
 
 	// Profiles UI & Modals
+	pendingClashImports map[string]bool
 	ShowImportModal     bool
 	ImportURL           string
 	ImportName          string
@@ -1893,6 +1894,42 @@ func (a *App) ActivateProfile(id string) {
 	if a.CoreInfo.Status == model.CoreRunning {
 		go a.RestartCore()
 	}
+}
+
+// ImportClashLink adds a subscription opened by the OS to the profile library.
+func (a *App) ImportClashLink(raw string) {
+	a.Page = PageProfiles
+	target, name, ok := profile.ParseClashInstallURL(raw)
+	if !ok {
+		a.Notify(a.Tr("无效的 Clash 订阅导入链接", "Invalid Clash subscription link"))
+		return
+	}
+	for _, p := range a.PM.Profiles() {
+		if p.Kind == "remote" && p.URL == target {
+			a.Notify(a.Tr("订阅已存在：", "Subscription already exists: ") + p.Name)
+			return
+		}
+	}
+	if a.pendingClashImports[target] {
+		return
+	}
+	if a.pendingClashImports == nil {
+		a.pendingClashImports = make(map[string]bool)
+	}
+	a.pendingClashImports[target] = true
+	a.Notify(a.Tr("正在导入订阅…", "Importing subscription…"))
+	go func() {
+		p, err := a.PM.ImportRemote(context.Background(), name, target, "", false)
+		a.UpdateUI(func() {
+			delete(a.pendingClashImports, target)
+			if err != nil {
+				a.Notify(a.Tr("订阅导入失败，请检查地址和网络后重试", "Import failed. Check the subscription address and network, then try again."))
+				return
+			}
+			a.Profiles = a.PM.Profiles()
+			a.Notify(a.Tr("已导入订阅：", "Subscription imported: ") + p.Name)
+		})
+	}()
 }
 
 // PickLocalProfile opens a file chooser to import a local sing-box JSON profile.

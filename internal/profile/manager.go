@@ -684,6 +684,23 @@ func unwrapSubDeepLink(raw string) string {
 	return raw
 }
 
+// ParseClashInstallURL recognizes the subscription installation action from the OS.
+func ParseClashInstallURL(raw string) (target, name string, ok bool) {
+	link, err := url.Parse(raw)
+	if err != nil || link.Scheme != "clash" || !strings.EqualFold(link.Host, "install-config") || link.User != nil || (link.Path != "" && link.Path != "/") {
+		return "", "", false
+	}
+	query, err := url.ParseQuery(link.RawQuery)
+	if err != nil || len(query["url"]) != 1 {
+		return "", "", false
+	}
+	sub, err := url.Parse(query.Get("url"))
+	if err != nil || (sub.Scheme != "https" && sub.Scheme != "http") || sub.Hostname() == "" {
+		return "", "", false
+	}
+	return sub.String(), strings.TrimSpace(query.Get("name")), true
+}
+
 const defaultMihomoStarterConfig = `mixed-port: 7890
 allow-lan: false
 mode: rule

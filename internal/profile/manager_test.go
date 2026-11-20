@@ -16,6 +16,25 @@ import (
 	"github.com/bihua-university/livery/internal/model"
 )
 
+func TestParseClashInstallURL(t *testing.T) {
+	target, name, ok := ParseClashInstallURL("CLASH://INSTALL-CONFIG/?url=https%3A%2F%2Fexample.org%2Fs%3Fk%3Da%252Bb%26v%3D1&name=My+Profile")
+	if !ok || target != "https://example.org/s?k=a%2Bb&v=1" || name != "My Profile" {
+		t.Fatalf("unexpected subscription: %q, %q, %v", target, name, ok)
+	}
+	for _, raw := range []string{
+		"clash://unknown?url=https://example.org/",
+		"clash://install-config",
+		"clash://install-config?url=file:///tmp/config",
+		"clash://install-config?url=https:///missing-host",
+		"clash://install-config?url=https://one.example/&url=https://two.example/",
+		"clash://install-config?url=%garbled",
+	} {
+		if _, _, ok := ParseClashInstallURL(raw); ok {
+			t.Errorf("accepted invalid install link %q", raw)
+		}
+	}
+}
+
 func TestSingBoxProxyURLUsesProfileInbound(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runtime.json")
 	for _, tc := range []struct{ raw, want string }{

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -62,7 +63,21 @@ func ensureE2EBinary(t *testing.T) string {
 			name += ".exe"
 		}
 		outPath := filepath.Join(dir, name)
-		cmd := exec.Command("go", "build", "-tags", "e2e", "-o", outPath, ".")
+		var manifest struct {
+			URLSchemes []string `json:"urlSchemes"`
+		}
+		b, err := os.ReadFile("mygo.json")
+		if err != nil {
+			e2eBuildErr = err
+			return
+		}
+		if err := json.Unmarshal(b, &manifest); err != nil {
+			e2eBuildErr = err
+			return
+		}
+		// Mirror the scheme metadata linked by mygo build, without installing an OS handler.
+		schemes := "-X github.com/egoist/mygo.packageURLSchemes=" + strings.Join(manifest.URLSchemes, ",")
+		cmd := exec.Command("go", "build", "-tags", "e2e", "-ldflags", schemes, "-o", outPath, ".")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			e2eBuildErr = fmt.Errorf("go build -tags e2e failed: %w\n%s", err, string(out))
 			return
@@ -115,7 +130,7 @@ type e2eHarness struct {
 	winID   int64
 }
 
-func launchE2EApp(t *testing.T, settings model.AppSettings) *e2eHarness {
+func launchE2EApp(t *testing.T, settings model.AppSettings, args ...string) *e2eHarness {
 	t.Helper()
 	skipIfNoE2E(t)
 	binPath := ensureE2EBinary(t)
@@ -144,7 +159,7 @@ func launchE2EApp(t *testing.T, settings model.AppSettings) *e2eHarness {
 		t.Fatalf("write settings.json: %v", err)
 	}
 
-	cmd := exec.Command(binPath)
+	cmd := exec.Command(binPath, args...)
 	cmd.Env = append(os.Environ(),
 		"LIVERY_DATA_DIR="+dataDir,
 		"MYGO_AUTOMATION="+sockPath,
@@ -649,6 +664,41 @@ func TestE2ENavigationStoppedStateAndQuit(t *testing.T) {
 		h.cmd = nil // already waited
 	case <-time.After(10 * time.Second):
 		t.Fatalf("timed out waiting for app to exit after pressing win-close")
+	}
+}
+
+func TestE2EClashSubscriptionLaunches(t *testing.T) {
+	skipIfNoE2E(t)
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/subscription" || r.URL.Query().Get("token") != "a+b" {
+			http.NotFound(w, r)
+			return
+		}
+		downloads.Add(1)
+		fmt.Fprintln(w, "proxies: []\nrules:\n  - MATCH,DIRECT")
+	}))
+	t.Cleanup(server.Close)
+	link := func(name string) string {
+		return "clash://install-config?" + url.Values{
+			"url":  {server.URL + "/subscription?token=a%2Bb&id=" + url.QueryEscape(name)},
+			"name": {name},
+		}.Encode()
+	}
+	settings := baseTestSettings(server.Listener.Addr().(*net.TCPAddr).Port)
+	settings.SilentStart = true
+	h := launchE2EApp(t, settings, link("冷启动订阅"))
+	h.waitUntil(5*time.Second, "cold launch subscription", func(nodes []autoNode) bool { return hasNodeText(nodes, "冷启动订阅") })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, h.cmd.Path, link("冷启动订阅"), link("运行中订阅"))
+	cmd.Env = h.cmd.Env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("forward launch: %v: %s", err, out)
+	}
+	h.waitUntil(5*time.Second, "forwarded subscription", func(nodes []autoNode) bool { return hasNodeText(nodes, "运行中订阅") })
+	if downloads.Load() != 2 {
+		t.Fatalf("expected two distinct subscription downloads, got %d", downloads.Load())
 	}
 }
 

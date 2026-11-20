@@ -37,11 +37,20 @@ func main() {
 	debug.SetGCPercent(25)
 
 	automationMode := strings.TrimSpace(os.Getenv("MYGO_AUTOMATION")) != ""
-	if !automationMode && !mygo.App.RequestSingleInstanceLock() {
+	if automationMode {
+		// A test session can receive second launches without sharing the desktop app's lock.
+		mygo.App.SetName("Livery automation " + os.Getenv("MYGO_AUTOMATION"))
+	}
+	if !mygo.App.RequestSingleInstanceLock() {
 		return
 	}
 
 	mygo.App.SetName("Livery")
+	if !automationMode && os.Getenv("MYGO_GENERATE") == "" {
+		if err := mygo.App.RegisterURLScheme("clash"); err != nil {
+			log.Printf("register clash:// handler: %v", err)
+		}
+	}
 
 	userDataDir := strings.TrimSpace(os.Getenv("LIVERY_DATA_DIR"))
 	if userDataDir == "" {
@@ -157,6 +166,10 @@ func main() {
 
 	mygo.App.OnSecondInstance(func(_ []string, _ string) {
 		showWindow()
+	})
+	mygo.App.OnOpenURL(func(raw string) {
+		showWindow()
+		mainWin.Update(func() { controller.ImportClashLink(raw) })
 	})
 	mygo.App.OnActivate(func(hasVisibleWindows bool) {
 		if !hasVisibleWindows {
