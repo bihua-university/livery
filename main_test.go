@@ -419,6 +419,9 @@ type mockMihomo struct {
 
 	mu                   sync.Mutex
 	mode                 string
+	allowLAN             bool
+	mixedPort            int
+	cacheFlushes         []string
 	groupSelected        map[string]string
 	selectedAtDisconnect []string
 }
@@ -435,6 +438,12 @@ func startMockMihomo(t *testing.T) *mockMihomo {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /cache/{cache}/flush", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		m.cacheFlushes = append(m.cacheFlushes, r.PathValue("cache"))
+		m.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -445,22 +454,33 @@ func startMockMihomo(t *testing.T) *mockMihomo {
 	mux.HandleFunc("/configs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPatch {
 			var body struct {
-				Mode string `json:"mode"`
+				Mode      string `json:"mode"`
+				AllowLAN  *bool  `json:"allow-lan"`
+				MixedPort *int   `json:"mixed-port"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			m.mu.Lock()
 			if body.Mode != "" {
-				m.mu.Lock()
 				m.mode = body.Mode
-				m.mu.Unlock()
 			}
+			if body.AllowLAN != nil {
+				m.allowLAN = *body.AllowLAN
+			}
+			if body.MixedPort != nil {
+				m.mixedPort = *body.MixedPort
+			}
+			m.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		m.mu.Lock()
-		mode := m.mode
+		config := map[string]any{"mode": m.mode, "allow-lan": m.allowLAN}
+		if m.mixedPort != 0 {
+			config["mixed-port"] = m.mixedPort
+		}
 		m.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"mode": mode})
+		_ = json.NewEncoder(w).Encode(config)
 	})
 	mux.HandleFunc("/proxies", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
@@ -706,6 +726,7 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 	mock := startMockMihomo(t)
 	settings := baseTestSettings(mock.port)
 	settings.CloseConnectionsOnSwitch = true
+	settings.FlushDNSOnNetworkChange = false // Manual flush assertions are independent of host networking.
 	h := launchE2EApp(t, settings)
 
 	// 1. Overview attaches to external mock Mihomo and renders streamed /memory (50.95 MB) despite /connections memory=0.
@@ -830,6 +851,33 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 
 	// 5. Settings page: switch language to English and theme to Dark, verify persistence.
 	h.pressKey("nav-settings")
+	mock.mu.Lock()
+	mock.mixedPort = s.MixedPort
+	mock.mu.Unlock()
+	h.pressKey("set-allow-lan")
+	h.waitUntil(5*time.Second, "confirmed Allow LAN change", func(nodes []autoNode) bool {
+		node, ok := findByKey(nodes, "set-allow-lan")
+		return ok && slices.Contains(node.States, "checked") && !slices.Contains(node.States, "disabled")
+	})
+	testProxy := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(testProxy.Close)
+	newPort := testProxy.Listener.Addr().(*net.TCPAddr).Port
+	h.setValueKey("set-mixed-port", strconv.Itoa(newPort))
+	h.pressLabel("应用端口与核心设置")
+	h.waitUntil(5*time.Second, "mixed port change", func(_ []autoNode) bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return mock.mixedPort == newPort
+	})
+	h.pressKey("dns-cache-flush")
+	h.waitUntil(5*time.Second, "DNS and Fake-IP flush", func(_ []autoNode) bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return slices.Equal(mock.cacheFlushes, []string{"dns", "fakeip"}) && mock.allowLAN && mock.mixedPort == newPort
+	})
+	if saved := h.readSettings(); !saved.AllowLAN || saved.MixedPort != newPort {
+		t.Fatalf("inbound settings were not persisted: allow-lan=%t mixed-port=%d", saved.AllowLAN, saved.MixedPort)
+	}
 	for _, choice := range []struct{ label, mode string }{{"redir-host", "redir-host"}, {"fake-ip", "fake-ip"}, {"跟随配置", ""}} {
 		h.pressLabel(choice.label)
 		h.waitUntil(5*time.Second, "persisted DNS mode "+choice.label, func(_ []autoNode) bool {

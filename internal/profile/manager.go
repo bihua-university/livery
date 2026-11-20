@@ -86,10 +86,34 @@ func (m *Manager) Settings() model.AppSettings {
 // SaveSettings persists updated AppSettings to disk.
 func (m *Manager) SaveSettings(s model.AppSettings) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.saveSettingsLocked(s)
+}
+
+func (m *Manager) saveSettingsLocked(s model.AppSettings) error {
+	if err := writeJSONAtomic(filepath.Join(m.dataDir, "settings.json"), s); err != nil {
+		return err
+	}
 	m.settings = s
 	m.settings.CustomRules = slices.Clone(s.CustomRules)
-	m.mu.Unlock()
-	return writeJSONAtomic(filepath.Join(m.dataDir, "settings.json"), s)
+	return nil
+}
+
+// SaveInboundSetting merges a confirmed asynchronous listener change with
+// any other preferences saved while the API request was in flight.
+func (m *Manager) SaveInboundSetting(field string, want model.AppSettings) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.settings
+	switch field {
+	case "mixed-port":
+		s.MixedPort = want.MixedPort
+	case "allow-lan":
+		s.AllowLAN = want.AllowLAN
+	default:
+		return fmt.Errorf("unknown inbound setting %s", field)
+	}
+	return m.saveSettingsLocked(s)
 }
 
 // Profiles returns a snapshot slice of all profiles.
@@ -117,6 +141,7 @@ func (m *Manager) ActiveProfile() (model.Profile, bool) {
 // SetActive selects the active profile by ID and persists settings.
 func (m *Manager) SetActive(id string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	found := false
 	for _, p := range m.profiles {
 		if p.ID == id {
@@ -125,13 +150,11 @@ func (m *Manager) SetActive(id string) error {
 		}
 	}
 	if !found {
-		m.mu.Unlock()
 		return fmt.Errorf("profile %q not found", id)
 	}
-	m.settings.ActiveProfileID = id
 	s := m.settings
-	m.mu.Unlock()
-	return writeJSONAtomic(filepath.Join(m.dataDir, "settings.json"), s)
+	s.ActiveProfileID = id
+	return m.saveSettingsLocked(s)
 }
 
 // ProfilePath returns the file path of a profile's raw JSON.
@@ -451,24 +474,34 @@ func (m *Manager) Delete(id string) error {
 
 // CompileActive compiles the active profile with current settings and writes runtime config.
 func (m *Manager) CompileActive() (string, []byte, error) {
-	prof, ok := m.ActiveProfile()
-	if !ok {
-		return "", nil, errors.New("no active profile")
-	}
-	raw, err := os.ReadFile(m.ProfilePath(prof))
+	compiled, err := m.RenderActive(m.Settings())
 	if err != nil {
 		return "", nil, err
 	}
-	settings := m.Settings()
-	compiled, err := CompileForCore(raw, prof, settings)
+	outPath, err := m.SaveRuntimeConfig(compiled)
 	if err != nil {
-		return "", nil, err
-	}
-	outPath := m.RuntimeConfigPath()
-	if err := os.WriteFile(outPath, compiled, 0o644); err != nil {
 		return "", nil, err
 	}
 	return outPath, compiled, nil
+}
+
+// SaveRuntimeConfig replaces the runtime file only after a complete write.
+func (m *Manager) SaveRuntimeConfig(compiled []byte) (string, error) {
+	path := m.RuntimeConfigPath()
+	return path, writeAtomic(path, compiled)
+}
+
+// RenderActive compiles proposed settings without replacing the running core's file.
+func (m *Manager) RenderActive(settings model.AppSettings) ([]byte, error) {
+	prof, ok := m.ActiveProfile()
+	if !ok {
+		return nil, errors.New("no active profile")
+	}
+	raw, err := os.ReadFile(m.ProfilePath(prof))
+	if err != nil {
+		return nil, err
+	}
+	return CompileForCore(raw, prof, settings)
 }
 
 // ActiveRules parses routing rules from the active profile without writing runtime config to disk.
@@ -680,11 +713,23 @@ func writeJSONAtomic(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	return writeAtomic(path, append(b, '\n'))
+}
+
+func writeAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".livery-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func newID() string {

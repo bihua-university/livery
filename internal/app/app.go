@@ -141,6 +141,9 @@ type App struct {
 	// Profiles UI & Modals
 	pendingClashImports map[string]bool
 	SavingDNSMode       bool
+	ApplyingInbound     bool
+	FlushingDNS         bool
+	networkChanged      atomic.Bool
 	ShowImportModal     bool
 	ImportURL           string
 	ImportName          string
@@ -865,9 +868,11 @@ func (a *App) ClearLogs() {
 
 // APIClient returns a cached Clash API client for the configured management endpoint.
 func (a *App) APIClient() *clashapi.Client {
-	host := a.SettingsData.ClashAPIHost
-	port := a.SettingsData.ClashAPIPort
-	secret := a.SettingsData.ClashAPISecret
+	return a.apiClientFor(a.PM.Settings())
+}
+
+func (a *App) apiClientFor(s model.AppSettings) *clashapi.Client {
+	host, port, secret := s.ClashAPIHost, s.ClashAPIPort, s.ClashAPISecret
 
 	a.apiMu.Lock()
 	defer a.apiMu.Unlock()
@@ -903,6 +908,7 @@ func (a *App) TryAttachCore(ctx context.Context) bool {
 
 // StartBackground launches periodic background tasks.
 func (a *App) StartBackground(ctx context.Context) {
+	go a.watchDNSNetwork(ctx)
 	go func() {
 		a.coreOpMu.Lock()
 		attached := a.TryAttachCore(ctx)
@@ -2020,7 +2026,7 @@ func (a *App) OpenProfileEditor(id string) {
 
 // OpenRuntimePreview loads the compiled runtime config into the read-only code editor modal.
 func (a *App) OpenRuntimePreview() {
-	_, compiled, err := a.PM.CompileActive()
+	compiled, err := a.PM.RenderActive(a.PM.Settings())
 	if err != nil {
 		a.Notify(err.Error())
 		return
@@ -2076,11 +2082,7 @@ func (a *App) SetDNSMode(id, mode string) {
 			if a.SettingsData.ActiveProfileID != id || model.NormalizeCoreType(a.SettingsData.CoreType) != model.CoreMihomo || a.CoreInfo.Status != model.CoreRunning {
 				return
 			}
-			if a.CoreInfo.External {
-				a.Notify(a.Tr("DNS 模式已保存，下次由 Livery 启动核心时生效", "DNS mode saved for the next Livery-managed start"))
-				return
-			}
-			go a.RestartCore()
+			a.ApplyProfileChanges()
 		})
 	}()
 }
@@ -2233,9 +2235,7 @@ func (a *App) DeleteCustomRuleAt(idx int) {
 	a.SettingsData.CustomRules = slices.Delete(a.SettingsData.CustomRules, idx, idx+1)
 	_ = a.PM.SaveSettings(a.SettingsData)
 	a.ReloadRulesFromActiveProfile()
-	if a.CoreInfo.Status == model.CoreRunning {
-		go a.RestartCore()
-	}
+	a.ApplyProfileChanges()
 }
 
 // AppUpdateState summarizes OTA update availability and preferences for UI/tray rendering.

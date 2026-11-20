@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -152,6 +153,55 @@ func TestClientModeAndRules(t *testing.T) {
 	rules, err := c.GetRules(ctx)
 	if err != nil || len(rules) != 1 || rules[0].Payload != "google.com" {
 		t.Fatalf("GetRules: got %+v, err=%v", rules, err)
+	}
+}
+
+func TestLiveConfigAndCacheErrors(t *testing.T) {
+	const payload = "dns:\n  enable: true\n  enhanced-mode: redir-host\n"
+	port := 7890
+	var patches []int
+	var flushed []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /configs", func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Payload string }
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body.Payload != payload || r.URL.Query().Get("force") != "true" {
+			t.Error("missing compiled configuration")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /configs", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, `{"mixed-port":%d}`, port) })
+	mux.HandleFunc("PATCH /configs", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]int
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		port = body["mixed-port"]
+		patches = append(patches, port)
+		if port == 8888 {
+			port = 0
+		} // Failed bind still returns 204.
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /cache/{name}/flush", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		flushed = append(flushed, name)
+		if name == "dns" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	client, closeServer := newMockClient(mux)
+	defer closeServer()
+	ctx := context.Background()
+	if err := client.ReloadConfig(ctx, []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.PatchInbound(ctx, "mixed-port", 8888); err == nil || !slices.Equal(patches, []int{8888, 7890}) {
+		t.Fatalf("failed port change: err=%v, patches=%v", err, patches)
+	}
+	if err := client.FlushDNSCaches(ctx); err == nil || !slices.Equal(flushed, []string{"dns", "fakeip"}) {
+		t.Fatalf("partial flush: err=%v, calls=%v", err, flushed)
 	}
 }
 

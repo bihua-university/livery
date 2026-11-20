@@ -57,9 +57,7 @@ func Rules(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 									a.SettingsData.CustomRules[idx].Enabled = en
 									_ = a.PM.SaveSettings(a.SettingsData)
 									a.ReloadRulesFromActiveProfile()
-									if a.CoreInfo.Status == model.CoreRunning {
-										go a.RestartCore()
-									}
+									a.ApplyProfileChanges()
 								}
 								prio := a.Tr("前置", "Prepend")
 								if !r.Prepend {

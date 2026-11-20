@@ -205,6 +205,12 @@ func main() {
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
+	offNetwork := mygo.Network.OnChanged(func(status mygo.NetworkStatus) {
+		if status.Online {
+			controller.NetworkChanged()
+		}
+	})
+	defer offNetwork()
 
 	mygo.App.WhenReady(func() {
 		s := controller.Settings()

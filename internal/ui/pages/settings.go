@@ -2,6 +2,7 @@ package pages
 
 import (
 	"fmt"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -76,7 +77,7 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				})
 
 				ui.Row(c).Gap(12).Children(func() {
-					if components.LabeledInput(c, p, s, "set-mixed-port", a.Tr("Mixed 入站端口 (HTTP/SOCKS5)", "Mixed Inbound Port"), "7890", &a.MixedPortDraft).Submitted() {
+					if components.LabeledInput(c, p, s, "set-mixed-port", a.Tr("Mixed 入站端口 (HTTP/SOCKS5)", "Mixed Inbound Port"), "7890", &a.MixedPortDraft).Disabled(a.ApplyingInbound).Submitted() {
 						commitNumericSettings(a)
 					}
 					if components.LabeledInput(c, p, s, "set-api-port", a.Tr("Clash API 端口", "Clash API Port"), "9090", &a.APIPortDraft).Submitted() {
@@ -120,18 +121,31 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				}
 
 				ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
-					if ui.Checkbox(c.Key("set-allow-lan"), &a.SettingsData.AllowLAN, a.Tr("允许局域网连接 (0.0.0.0)", "Allow LAN (0.0.0.0)")).Changed() {
-						a.ApplySettings(true)
+					if ui.Checkbox(c.Key("set-allow-lan"), &a.SettingsData.AllowLAN, a.Tr("允许局域网连接 (0.0.0.0)", "Allow LAN (0.0.0.0)")).Disabled(a.ApplyingInbound).Changed() {
+						a.ApplyInbound("allow-lan")
 					}
 					if ui.Checkbox(c.Key("set-autostart"), &a.SettingsData.AutoStartCore, a.Tr("启动应用时自动运行核心", "Auto-start core on launch")).Changed() {
 						a.ApplySettings(false)
 					}
 					ui.Spacer(c)
-					if components.PrimaryActionButton(c, p, s, icons.Check, a.Tr("应用端口与核心设置", "Apply Core Settings")).Clicked() {
+					if components.PrimaryActionButton(c, p, s, icons.Check, a.Tr("应用端口与核心设置", "Apply Core Settings")).Disabled(a.ApplyingInbound).Clicked() {
 						commitNumericSettings(a)
 					}
 				})
 			})
+
+			if model.NormalizeCoreType(a.SettingsData.CoreType) == model.CoreMihomo {
+				components.Card(c, p, func() {
+					components.SectionHeader(c, p, s, a.Tr("DNS 缓存", "DNS cache"), func() {
+						if components.ActionButton(c.Key("dns-cache-flush"), p, s, icons.Refresh, a.Tr("清理缓存", "Clear cache")).Disabled(a.CoreInfo.Status != model.CoreRunning || a.FlushingDNS).Clicked() {
+							a.FlushDNSCaches()
+						}
+					})
+					if ui.Checkbox(c.Key("dns-cache-auto"), &a.SettingsData.FlushDNSOnNetworkChange, a.Tr("切换网络后自动清理 DNS 和 Fake-IP 缓存", "Clear DNS and Fake-IP caches on network changes")).Changed() {
+						a.ApplySettings(false)
+					}
+				})
+			}
 
 			// 2. System Proxy & TUN
 			components.Card(c, p, func() {
@@ -498,7 +512,7 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 }
 
 func commitNumericSettings(a *app.App) {
-	prevMixedPort := a.SettingsData.MixedPort
+	prev := a.PM.Settings()
 	if port, err := strconv.Atoi(strings.TrimSpace(a.MixedPortDraft)); err == nil && port > 0 && port <= 65535 {
 		a.SettingsData.MixedPort = port
 	}
@@ -508,9 +522,22 @@ func commitNumericSettings(a *app.App) {
 	if mtu, err := strconv.Atoi(strings.TrimSpace(a.TUNMTUDraft)); err == nil && mtu >= 576 && mtu <= 65535 {
 		a.SettingsData.TUNMTU = mtu
 	}
-	_ = a.PM.SaveSettings(a.SettingsData)
+	otherSettings := a.SettingsData
+	otherSettings.MixedPort = prev.MixedPort
+	if reflect.DeepEqual(otherSettings, prev) {
+		if a.SettingsData.MixedPort != prev.MixedPort {
+			a.ApplyInbound("mixed-port")
+		} else if !a.CoreInfo.External {
+			a.ApplyProfileChanges()
+		}
+		return
+	}
+	if err := a.PM.SaveSettings(a.SettingsData); err != nil {
+		a.Notify(err.Error())
+		return
+	}
 	a.Notify(a.Tr("设置已保存", "Settings saved"))
-	if a.SettingsData.SystemProxyEnabled && a.SettingsData.MixedPort != prevMixedPort {
+	if a.SettingsData.SystemProxyEnabled && a.SettingsData.MixedPort != prev.MixedPort {
 		go a.SetSystemProxy(true)
 	}
 	if a.CoreInfo.Status == model.CoreRunning {

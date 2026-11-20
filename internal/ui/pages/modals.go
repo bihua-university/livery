@@ -177,7 +177,7 @@ func editorModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 					a.ShowEditorModal = false
 					a.Notify(a.Tr("配置已保存", "Profile saved"))
 					if a.EditingProfileID == a.SettingsData.ActiveProfileID && a.CoreInfo.Status == model.CoreRunning {
-						go a.RestartCore()
+						a.ApplyProfileChanges()
 					}
 				}
 			}
@@ -225,7 +225,7 @@ func metaModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				a.ShowMetaModal = false
 				a.Notify(a.Tr("配置属性已保存", "Profile updated"))
 				if a.MetaDraft.ID == a.SettingsData.ActiveProfileID && a.CoreInfo.Status == model.CoreRunning {
-					go a.RestartCore()
+					a.ApplyProfileChanges()
 				}
 			}
 		})
@@ -273,9 +273,7 @@ func ruleModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				a.ReloadRulesFromActiveProfile()
 				a.ShowRuleModal = false
 				a.Notify(a.Tr("已添加自定义规则", "Custom rule added"))
-				if a.CoreInfo.Status == model.CoreRunning {
-					go a.RestartCore()
-				}
+				a.ApplyProfileChanges()
 			}
 		})
 	})

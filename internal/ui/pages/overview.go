@@ -256,9 +256,9 @@ func overviewInfoTrio(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeSc
 					lanText = a.Tr("局域网代理 · 0.0.0.0", "LAN Proxy · 0.0.0.0")
 				}
 				ui.Text(c, lanText).FontSize(s.XS).TextColor(p.ForegroundSubtle).Grow(1).SingleLine()
-				if components.Toggle(c.Key("ov-allow-lan"), p, &lanOn).Label(a.Tr("局域网代理", "Allow LAN")).Changed() {
+				if components.Toggle(c.Key("ov-allow-lan"), p, &lanOn).Label(a.Tr("局域网代理", "Allow LAN")).Disabled(a.ApplyingInbound).Changed() {
 					a.SettingsData.AllowLAN = lanOn
-					a.ApplySettings(true)
+					a.ApplyInbound("allow-lan")
 				}
 			})
 		}).Padding(12, 14).Gap(8)

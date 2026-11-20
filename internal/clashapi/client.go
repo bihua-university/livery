@@ -70,6 +70,10 @@ func (c *Client) CloseIdleConnections() {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	return c.request(ctx, c.http, method, path, body)
+}
+
+func (c *Client) request(ctx context.Context, transport *http.Client, method, path string, body any) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -88,7 +92,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (*http.R
 	if c.secret != "" {
 		req.Header.Set("Authorization", "Bearer "+c.secret)
 	}
-	return c.http.Do(req)
+	return transport.Do(req)
 }
 
 func (c *Client) doStream(ctx context.Context, path string) (*http.Response, error) {
@@ -184,11 +188,94 @@ func (c *Client) ProxyURL(ctx context.Context, coreType model.CoreType, configur
 
 // SetMode changes the active proxy mode via PATCH /configs.
 func (c *Client) SetMode(ctx context.Context, mode model.ProxyMode) error {
-	resp, err := c.do(ctx, http.MethodPatch, "/configs", map[string]string{"mode": string(mode)})
+	return c.PatchConfig(ctx, map[string]any{"mode": string(mode)})
+}
+
+func (c *Client) PatchConfig(ctx context.Context, fields map[string]any) error {
+	resp, err := c.do(ctx, http.MethodPatch, "/configs", fields)
 	if err != nil {
 		return err
 	}
 	return decodeJSON(resp, nil)
+}
+
+// PatchInbound checks the listener after PATCH: Mihomo can return 204 even
+// when a replacement listener could not bind its port.
+func (c *Client) PatchInbound(ctx context.Context, field string, value any) error {
+	read := func() (json.RawMessage, error) {
+		resp, err := c.do(ctx, http.MethodGet, "/configs", nil)
+		if err != nil {
+			return nil, err
+		}
+		var current map[string]json.RawMessage
+		if err := decodeJSON(resp, &current); err != nil {
+			return nil, err
+		}
+		if len(current[field]) == 0 {
+			return nil, fmt.Errorf("controller does not report %s", field)
+		}
+		return current[field], nil
+	}
+	previous, err := read()
+	if err != nil {
+		return err
+	}
+	want, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(previous, want) {
+		return nil
+	}
+	if err := c.PatchConfig(ctx, map[string]any{field: value}); err != nil {
+		return err
+	}
+	current, err := read()
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(current, want) {
+		return nil
+	}
+	// A failed bind can leave the previous listener closed.
+	if !bytes.Equal(current, previous) {
+		if err := c.PatchConfig(ctx, map[string]any{field: previous}); err != nil {
+			return fmt.Errorf("restore %s after failed update: %w", field, err)
+		}
+		restored, err := read()
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(restored, previous) {
+			return fmt.Errorf("controller failed to restore %s=%s", field, previous)
+		}
+	}
+	return fmt.Errorf("controller did not apply %s=%s", field, want)
+}
+
+// ReloadConfig applies a compiled profile within the existing Mihomo process.
+func (c *Client) ReloadConfig(ctx context.Context, payload []byte) error {
+	// Reload may wait for rule and proxy providers before acknowledging.
+	httpClient := &http.Client{Transport: c.http.Transport, Timeout: 90 * time.Second}
+	resp, err := c.request(ctx, httpClient, http.MethodPut, "/configs?force=true", map[string]string{"payload": string(payload)})
+	if err != nil {
+		return err
+	}
+	return decodeJSON(resp, nil)
+}
+
+func (c *Client) FlushDNSCaches(ctx context.Context) error {
+	var errs []error
+	for _, cache := range []string{"dns", "fakeip"} {
+		resp, err := c.do(ctx, http.MethodPost, "/cache/"+cache+"/flush", nil)
+		if err == nil {
+			err = decodeJSON(resp, nil)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", cache, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // UpdateGeo triggers Mihomo's POST /configs/geo endpoint to update and reload GeoIP/GeoSite databases.

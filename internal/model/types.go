@@ -129,6 +129,7 @@ type AppSettings struct {
 
 	// Routing & system proxy
 	CloseConnectionsOnSwitch bool `json:"close_connections_on_switch"`
+	FlushDNSOnNetworkChange bool `json:"flush_dns_on_network_change"`
 	ProxyMode          ProxyMode `json:"proxy_mode"`
 	SystemProxyEnabled bool      `json:"system_proxy_enabled"`
 	SystemProxyBypass  string    `json:"system_proxy_bypass"`
@@ -202,6 +203,7 @@ const (
 // DefaultSettings returns sane Clash-Verge-like defaults with mihomo as the default core.
 func DefaultSettings() AppSettings {
 	return AppSettings{
+		FlushDNSOnNetworkChange: true,
 		CoreType:           CoreMihomo,
 		ClashAPIHost:       "127.0.0.1",
 		ClashAPIPort:       9090,
