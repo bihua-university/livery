@@ -123,7 +123,12 @@ func (m *Manager) RefreshBinaryInfo(customPath string) model.CoreInfo {
 	return snap
 }
 
+var disableLocalBinaries bool // Set only by the E2E automation build.
+
 func (m *Manager) resolveBinary(coreType model.CoreType, custom string) (string, bool) {
+	if disableLocalBinaries {
+		return "", false
+	}
 	names := binaryNames(coreType)
 	custom = strings.TrimSpace(custom)
 	if custom != "" {

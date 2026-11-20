@@ -75,16 +75,6 @@ func ensureE2EBinary(t *testing.T) string {
 	return e2eBinPath
 }
 
-func freeTCPPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocate free tcp port: %v", err)
-	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
-}
-
 type autoWindow struct {
 	ID      int64  `json:"id"`
 	Title   string `json:"title"`
@@ -139,6 +129,13 @@ func launchE2EApp(t *testing.T, settings model.AppSettings) *e2eHarness {
 	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
 	sockPath := filepath.Join(sockDir, "a.sock")
 
+	// Own the mixed port as well as the controller. No test traffic can
+	// reach a proxy installed on the host or leave through its default port.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "test proxy has no upstream", http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	settings.MixedPort = proxy.Listener.Addr().(*net.TCPAddr).Port
 	settingsBytes, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal settings: %v", err)
@@ -607,8 +604,9 @@ func startMockMihomo(t *testing.T) *mockMihomo {
 }
 
 func TestE2ENavigationStoppedStateAndQuit(t *testing.T) {
-	unusedPort := freeTCPPort(t)
-	h := launchE2EApp(t, baseTestSettings(unusedPort))
+	stopped := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(stopped.Close)
+	h := launchE2EApp(t, baseTestSettings(stopped.Listener.Addr().(*net.TCPAddr).Port))
 
 	h.waitUntil(5*time.Second, "overview stopped state", func(nodes []autoNode) bool {
 		return hasNodeText(nodes, "Livery") &&
