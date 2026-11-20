@@ -405,9 +405,10 @@ type mockMihomo struct {
 	server *httptest.Server
 	port   int
 
-	mu            sync.Mutex
-	mode          string
-	groupSelected map[string]string
+	mu                   sync.Mutex
+	mode                 string
+	groupSelected        map[string]string
+	selectedAtDisconnect []string
 }
 
 func startMockMihomo(t *testing.T) *mockMihomo {
@@ -520,6 +521,13 @@ func startMockMihomo(t *testing.T) *mockMihomo {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/connections", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			m.mu.Lock()
+			m.selectedAtDisconnect = append(m.selectedAtDisconnect, m.groupSelected["选择节点"])
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// Mimic real Mihomo: /connections returns memory: 0 while real memory arrives via /memory stream.
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -648,7 +656,9 @@ func TestE2ENavigationStoppedStateAndQuit(t *testing.T) {
 
 func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 	mock := startMockMihomo(t)
-	h := launchE2EApp(t, baseTestSettings(mock.port))
+	settings := baseTestSettings(mock.port)
+	settings.CloseConnectionsOnSwitch = true
+	h := launchE2EApp(t, settings)
 
 	// 1. Overview attaches to external mock Mihomo and renders streamed /memory (50.95 MB) despite /connections memory=0.
 	h.waitUntil(8*time.Second, "attached Mihomo overview with streamed core memory", func(nodes []autoNode) bool {
@@ -686,17 +696,18 @@ func TestE2EMihomoAttachedMemoryProxiesRulesAndSettings(t *testing.T) {
 		t.Fatalf("expected collapsed second group node SG-01 to be hidden initially")
 	}
 
+	h.pressKey("node-选择节点-HK-01")
 	h.pressKey("node-选择节点-JP-01")
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		mock.mu.Lock()
-		sel := mock.groupSelected["选择节点"]
+		closed := slices.Clone(mock.selectedAtDisconnect)
 		mock.mu.Unlock()
-		if sel == "JP-01" {
+		if slices.Equal(closed, []string{"JP-01"}) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected 选择节点 selected node updated to JP-01, got %q", sel)
+			t.Fatalf("expected one disconnect after switching to JP-01, got %v", closed)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

@@ -1622,17 +1622,40 @@ func (a *App) Shutdown() {
 
 // SelectProxy selects an outbound node inside a selector group.
 func (a *App) SelectProxy(group, target string) {
+	previous := ""
+	closeConnections := false
 	for i := range a.Groups {
 		if a.Groups[i].Name == group {
+			previous = a.Groups[i].Now
+			if previous == target {
+				return
+			}
+			closeConnections = a.SettingsData.CloseConnectionsOnSwitch
 			a.Groups[i].Now = target
 			break
 		}
 	}
+	client := a.APIClient()
 	go func() {
-		if err := a.APIClient().SelectProxy(context.Background(), group, target); err != nil {
+		ctx := context.Background()
+		if err := client.SelectProxy(ctx, group, target); err != nil {
 			a.UpdateUI(func() {
+				for i := range a.Groups {
+					if a.Groups[i].Name == group && a.Groups[i].Now == target {
+						a.Groups[i].Now = previous
+						break
+					}
+				}
 				a.Notify(a.Tr("切换节点失败: ", "Switch failed: ") + err.Error())
 			})
+			return
+		}
+		if closeConnections {
+			if err := client.CloseAllConnections(ctx); err != nil {
+				a.UpdateUI(func() {
+					a.Notify(a.Tr("节点已切换，断开连接失败: ", "Node switched, but closing connections failed: ") + err.Error())
+				})
+			}
 		}
 	}()
 }

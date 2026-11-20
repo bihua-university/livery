@@ -98,6 +98,11 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 					}
 				})
 
+				if ui.Checkbox(c.Key("set-close-connections-on-switch"), &a.SettingsData.CloseConnectionsOnSwitch,
+					a.Tr("切换节点成功后断开所有活动连接", "Close all active connections after switching nodes")).Changed() {
+					a.ApplySettings(false)
+				}
+
 				ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
 					if ui.Checkbox(c.Key("set-allow-lan"), &a.SettingsData.AllowLAN, a.Tr("允许局域网连接 (0.0.0.0)", "Allow LAN (0.0.0.0)")).Changed() {
 						a.ApplySettings(true)

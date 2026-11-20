@@ -92,6 +92,32 @@ func TestSettingsSoftwareUpdatesSection(t *testing.T) {
 	}
 }
 
+func TestSettingsCloseConnectionsOnSwitch(t *testing.T) {
+	dir := t.TempDir()
+	pm, err := profile.NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := app.New(pm, core.NewManager(dir, dir, nil, nil))
+	t.Cleanup(a.Shutdown)
+	tester := ui.NewTester(func(c *ui.Context) {
+		Settings(c, a, theme.Light(), theme.Scale(14))
+	}, 960, 900)
+	if a.SettingsData.CloseConnectionsOnSwitch {
+		t.Fatal("disconnect on node change should be opt-in")
+	}
+	if err := tester.Click("切换节点成功后断开所有活动连接"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := profile.NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Settings().CloseConnectionsOnSwitch {
+		t.Fatal("disconnect on node change was not saved")
+	}
+}
+
 func TestSettingsTUNBypassPrivateRouteCheckbox(t *testing.T) {
 	dir := t.TempDir()
 	pm, err := profile.NewManager(dir)
@@ -122,4 +148,3 @@ func TestSettingsTUNBypassPrivateRouteCheckbox(t *testing.T) {
 		t.Fatal("expected TUNBypassPrivateRoute to toggle false after click")
 	}
 }
-

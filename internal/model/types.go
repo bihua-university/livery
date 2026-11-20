@@ -127,6 +127,7 @@ type AppSettings struct {
 	DelayTestTimeoutMs int    `json:"delay_test_timeout_ms"`
 
 	// Routing & system proxy
+	CloseConnectionsOnSwitch bool `json:"close_connections_on_switch"`
 	ProxyMode          ProxyMode `json:"proxy_mode"`
 	SystemProxyEnabled bool      `json:"system_proxy_enabled"`
 	SystemProxyBypass  string    `json:"system_proxy_bypass"`
