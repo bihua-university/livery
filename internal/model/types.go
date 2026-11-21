@@ -1,6 +1,8 @@
 package model
 
 import (
+	"cmp"
+	"strings"
 	"time"
 
 	"github.com/bihua-university/livery/internal/sysproxy"
@@ -84,6 +86,15 @@ type ProfileOverride struct {
 	InjectClashAPI   bool   `json:"inject_clash_api"`
 	OverrideLog      bool   `json:"override_log"`
 	PatchJSON        string `json:"patch_json,omitempty"`
+}
+
+// DefaultProfileOverride returns the default per-profile override options.
+func DefaultProfileOverride() ProfileOverride {
+	return ProfileOverride{
+		OverrideInbounds: true,
+		InjectClashAPI:   true,
+		OverrideLog:      true,
+	}
 }
 
 // SubscriptionInfo stores Subscription-Userinfo quota metadata from remote subscriptions.
@@ -199,6 +210,15 @@ func (s *AppSettings) SetCorePathFor(ct CoreType, path string) {
 }
 
 const (
+	DefaultClashAPIHost       = "127.0.0.1"
+	DefaultClashAPIPort       = 9090
+	DefaultMixedPort          = 7890
+	DefaultDelayTestURL       = "http://www.gstatic.com/generate_204"
+	DefaultDelayTestTimeoutMs = 5000
+	DefaultTUNStack           = "mixed"
+	DefaultTUNMTU             = 9000
+	DefaultTUNInterfaceName   = "sing-tun"
+
 	DefaultGeoIPURL   = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
 	DefaultGeoSiteURL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
 	DefaultMMDBURL    = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
@@ -209,38 +229,78 @@ const (
 func DefaultSettings() AppSettings {
 	return AppSettings{
 		FlushDNSOnNetworkChange: true,
-		CoreType:           CoreMihomo,
-		ClashAPIHost:       "127.0.0.1",
-		ClashAPIPort:       9090,
-		MixedPort:          7890,
-		AllowLAN:           false,
-		LogLevel:           "info",
-		DelayTestURL:       "http://www.gstatic.com/generate_204",
-		DelayTestTimeoutMs: 5000,
-		ProxyMode:          ModeRule,
-		SystemProxyBypass:  sysproxy.DefaultBypass(),
-		ProxyGuard:         false,
-		ProxyGuardInterval: 10,
-		TUNEnabled:            false,
-		TUNStack:              "mixed",
-		TUNMTU:                9000,
-		TUNAutoRoute:          true,
-		TUNStrictRoute:        true,
-		TUNBypassPrivateRoute: true,
-		TUNInterfaceName:      "sing-tun",
-		GeoDataMode:        false,
-		GeoAutoUpdate:      false,
-		GeoUpdateIntervalH: 24,
-		GeoIPURL:           DefaultGeoIPURL,
-		GeoSiteURL:         DefaultGeoSiteURL,
-		MMDBURL:            DefaultMMDBURL,
-		ASNURL:             DefaultASNURL,
-		ThemeMode:          ThemeSystem,
-		UIFontSize:         14,
-		Language:           LangZH,
-		CloseAction:        CloseToTray,
-		AutoStartCore:      true,
+		CoreType:                CoreMihomo,
+		ClashAPIHost:            DefaultClashAPIHost,
+		ClashAPIPort:            DefaultClashAPIPort,
+		MixedPort:               DefaultMixedPort,
+		AllowLAN:                false,
+		LogLevel:                "info",
+		DelayTestURL:            DefaultDelayTestURL,
+		DelayTestTimeoutMs:      DefaultDelayTestTimeoutMs,
+		ProxyMode:               ModeRule,
+		SystemProxyBypass:       sysproxy.DefaultBypass(),
+		ProxyGuard:              false,
+		ProxyGuardInterval:      10,
+		TUNEnabled:              false,
+		TUNStack:                DefaultTUNStack,
+		TUNMTU:                  DefaultTUNMTU,
+		TUNAutoRoute:            true,
+		TUNStrictRoute:          true,
+		TUNBypassPrivateRoute:   true,
+		TUNInterfaceName:        DefaultTUNInterfaceName,
+		GeoDataMode:             false,
+		GeoAutoUpdate:           false,
+		GeoUpdateIntervalH:      24,
+		GeoIPURL:                DefaultGeoIPURL,
+		GeoSiteURL:              DefaultGeoSiteURL,
+		MMDBURL:                 DefaultMMDBURL,
+		ASNURL:                  DefaultASNURL,
+		ThemeMode:               ThemeSystem,
+		UIFontSize:              14,
+		Language:                LangZH,
+		CloseAction:             CloseToTray,
+		AutoStartCore:           true,
 	}
+}
+
+// WithDefaults fills zero or out-of-range settings fields with values from DefaultSettings.
+func (s AppSettings) WithDefaults() AppSettings {
+	def := DefaultSettings()
+	s.CoreType = NormalizeCoreType(s.CoreType)
+	s.ClashAPIHost = cmp.Or(s.ClashAPIHost, def.ClashAPIHost)
+	if s.ClashAPIPort <= 0 {
+		s.ClashAPIPort = def.ClashAPIPort
+	}
+	if s.MixedPort <= 0 {
+		s.MixedPort = def.MixedPort
+	}
+	s.DelayTestURL = cmp.Or(s.DelayTestURL, def.DelayTestURL)
+	if s.DelayTestTimeoutMs <= 0 {
+		s.DelayTestTimeoutMs = def.DelayTestTimeoutMs
+	}
+	s.TUNStack = cmp.Or(s.TUNStack, def.TUNStack)
+	if s.TUNMTU <= 0 {
+		s.TUNMTU = def.TUNMTU
+	}
+	s.TUNInterfaceName = cmp.Or(s.TUNInterfaceName, def.TUNInterfaceName)
+	if s.UIFontSize < 12 || s.UIFontSize > 18 {
+		s.UIFontSize = def.UIFontSize
+	}
+	s.ThemeMode = cmp.Or(s.ThemeMode, def.ThemeMode)
+	s.Language = cmp.Or(s.Language, def.Language)
+	s.CloseAction = cmp.Or(s.CloseAction, def.CloseAction)
+	s.ProxyMode = cmp.Or(s.ProxyMode, def.ProxyMode)
+	if s.GeoUpdateIntervalH <= 0 {
+		s.GeoUpdateIntervalH = def.GeoUpdateIntervalH
+	}
+	s.GeoIPURL = cmp.Or(s.GeoIPURL, def.GeoIPURL)
+	s.GeoSiteURL = cmp.Or(s.GeoSiteURL, def.GeoSiteURL)
+	s.MMDBURL = cmp.Or(s.MMDBURL, def.MMDBURL)
+	s.ASNURL = cmp.Or(s.ASNURL, def.ASNURL)
+	if strings.TrimSpace(s.SystemProxyBypass) == "" || sysproxy.IsLegacyDefaultBypass(s.SystemProxyBypass) {
+		s.SystemProxyBypass = def.SystemProxyBypass
+	}
+	return s
 }
 
 // GeoFileStatus describes a locally cached GeoIP / GeoSite / MMDB / ASN database file.

@@ -51,6 +51,7 @@ type Palette struct {
 	TabActive    ui.Color
 	TabBorder    ui.Color
 	Tag          ui.Color
+	ToggleOff    ui.Color
 
 	// Borders
 	Border      ui.Color
@@ -67,6 +68,8 @@ type Palette struct {
 	Primary           ui.Color
 	PrimaryForeground ui.Color
 	Secondary         ui.Color
+	Accent            ui.Color
+	AccentForeground  ui.Color
 	AccentSurface     ui.Color
 	IconBlue          ui.Color
 	IconPurple        ui.Color
@@ -123,6 +126,7 @@ func Light() Palette {
 		TabActive:                 ui.Hex("#ffffff"),
 		TabBorder:                 bdr,
 		Tag:                       ui.Hex("#e6e6e6"),
+		ToggleOff:                 ui.RGBA(13, 13, 13, 0.20),
 		Border:                    bdr,
 		BorderHover:               bdrHover,
 		Foreground:                ui.Hex("#171717"),
@@ -133,6 +137,8 @@ func Light() Palette {
 		Primary:                   ui.Hex("#000000"),
 		PrimaryForeground:         ui.Hex("#ffffff"),
 		Secondary:                 ui.Hex("#e6e6e6"),
+		Accent:                    ui.Hex("#3B82F6"),
+		AccentForeground:          ui.Hex("#FFFFFF"),
 		AccentSurface:             ui.Hex("#ebf4ff"),
 		IconBlue:                  ui.Hex("#0066dd"),
 		IconPurple:                ui.Hex("#9e77ed"),
@@ -186,6 +192,7 @@ func Dark() Palette {
 		TabActive:                 ui.Hex("#161616"),
 		TabBorder:                 bdr,
 		Tag:                       ui.Hex("#363636"),
+		ToggleOff:                 ui.RGBA(255, 255, 255, 0.22),
 		Border:                    bdr,
 		BorderHover:               bdrHover,
 		Foreground:                ui.Hex("#f5f5f5"),
@@ -196,6 +203,8 @@ func Dark() Palette {
 		Primary:                   ui.Hex("#ffffff"),
 		PrimaryForeground:         ui.Hex("#000000"),
 		Secondary:                 ui.Hex("#363636"),
+		Accent:                    ui.Hex("#3B82F6"),
+		AccentForeground:          ui.Hex("#FFFFFF"),
 		AccentSurface:             ui.Hex("#001d3d"),
 		IconBlue:                  ui.Hex("#4099ff"),
 		IconPurple:                ui.Hex("#7b5ce5"),

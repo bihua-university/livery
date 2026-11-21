@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,6 +163,7 @@ type App struct {
 	EditorReadOnly   bool
 	EditorState      *editor.State
 	EditorError      string
+	SavingEditor     bool
 
 	ShowMetaModal   bool
 	MetaDraft       model.Profile
@@ -222,6 +223,7 @@ type App struct {
 	hasHiddenTraffic  bool
 	streamedCoreMem   atomic.Int64
 	overviewVisible   atomic.Bool
+	activePage        atomic.Value // stores string
 
 	mainRunner       func(func())
 	mainQueueMu      sync.Mutex
@@ -262,6 +264,7 @@ func New(pm *profile.Manager, cm *core.Manager) *App {
 		proxyGuardWakeCh:  make(chan struct{}, 1),
 		syncWakeCh:        make(chan struct{}, 1),
 	}
+	a.activePage.Store(PageOverview)
 	now := time.Now()
 	for i := range a.TrafficHistory {
 		a.TrafficHistory[i] = model.TrafficSample{Timestamp: now.Add(-time.Duration(maxTrafficSamples-1-i) * time.Second)}
@@ -537,7 +540,7 @@ func (a *App) OnLog(entry model.LogEntry) {
 	if a.LogStore != nil {
 		a.LogStore.Append(entry)
 	}
-	if a.Page == PageLogs && !a.WindowHidden.Load() && !a.LogPaused {
+	if a.currentPage() == PageLogs && !a.WindowHidden.Load() && !a.LogPaused {
 		if a.win != nil && !a.win.IsDestroyed() {
 			a.win.Invalidate()
 		}
@@ -738,6 +741,24 @@ func (a *App) RequestSnapshotSync() {
 	}
 }
 
+// SetActivePage updates the active UI page and mirrors it for lock-free background reads.
+func (a *App) SetActivePage(page string) {
+	a.Page = page
+	a.activePage.Store(page)
+}
+
+// SyncActivePage mirrors the current UI-thread Page field for lock-free background reads.
+func (a *App) SyncActivePage() {
+	a.activePage.Store(a.Page)
+}
+
+func (a *App) currentPage() string {
+	if p, ok := a.activePage.Load().(string); ok && p != "" {
+		return p
+	}
+	return PageOverview
+}
+
 // SetOverviewVisible tracks whether the Overview page is currently visible and refreshes app RSS on entry.
 func (a *App) SetOverviewVisible(visible bool) {
 	was := a.overviewVisible.Swap(visible)
@@ -897,22 +918,23 @@ func (a *App) apiClientFor(s model.AppSettings) *clashapi.Client {
 
 // TryAttachCore probes the configured Clash API management port and attaches if an external core is already active.
 func (a *App) TryAttachCore(ctx context.Context) bool {
-	if a.SettingsData.ClashAPIPort <= 0 {
+	s := a.PM.Settings()
+	if s.ClashAPIPort <= 0 {
 		return false
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 	defer cancel()
 
-	client := a.APIClient()
+	client := a.apiClientFor(s)
 	ver, err := client.Version(probeCtx)
 	if err != nil {
 		return false
 	}
-	host := a.SettingsData.ClashAPIHost
+	host := s.ClashAPIHost
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	a.CM.AttachExternal(ver, fmt.Sprintf("%s:%d", host, a.SettingsData.ClashAPIPort))
+	a.CM.AttachExternal(ver, fmt.Sprintf("%s:%d", host, s.ClashAPIPort))
 	return true
 }
 
@@ -1224,7 +1246,8 @@ func (a *App) startStreams() {
 					})
 				}
 			}
-			if a.Page == PageConnections || a.Page == PageOverview {
+			page := a.currentPage()
+			if page == PageConnections || page == PageOverview {
 				if snap, err := client.GetConnections(ctx); err == nil {
 					appMem := sampleAppMemory()
 					coreMem := sampleCoreProcessMemory(a.CM.Info(), a.PM.Settings().ClashAPIPort)
@@ -1251,7 +1274,8 @@ func (a *App) startStreams() {
 			}
 		}
 
-		syncOnce(a.Page == PageProxies || a.Page == PageOverview || a.Page == PageConnections)
+		page := a.currentPage()
+		syncOnce(page == PageProxies || page == PageOverview || page == PageConnections)
 		ticker := time.NewTicker(1500 * time.Millisecond)
 		defer ticker.Stop()
 		ticks := 0
@@ -1262,7 +1286,8 @@ func (a *App) startStreams() {
 				return
 			case <-a.syncWakeCh:
 				if !a.WindowHidden.Load() {
-					includeProxies := a.Page == PageProxies || a.Page == PageOverview || a.Page == PageConnections
+					p := a.currentPage()
+					includeProxies := p == PageProxies || p == PageOverview || p == PageConnections
 					syncOnce(includeProxies)
 				}
 			case <-ticker.C:
@@ -1284,7 +1309,8 @@ func (a *App) startStreams() {
 				if a.WindowHidden.Load() {
 					continue
 				}
-				includeProxies := a.Page == PageProxies || a.Page == PageOverview
+				p := a.currentPage()
+				includeProxies := p == PageProxies || p == PageOverview
 				syncOnce(includeProxies)
 			}
 		}
@@ -1464,7 +1490,7 @@ func (a *App) startCoreLocked(tryAttach bool) {
 	if a.shuttingDown.Load() || a.CM.Info().Status == model.CoreRunning {
 		return
 	}
-	coreName := a.CoreDisplayName()
+	coreName := model.CoreDisplayName(a.PM.Settings().CoreType)
 	if tryAttach && a.TryAttachCore(context.Background()) {
 		a.UpdateUI(func() {
 			a.Notify(a.Tr("检测到后台核心运行中，已通过管理端口连接", "Connected to running core via Clash API"))
@@ -1504,7 +1530,7 @@ func (a *App) startCoreLocked(tryAttach bool) {
 func (a *App) StopCore() {
 	a.coreOpMu.Lock()
 	wasExternal := a.CM.Info().External
-	coreName := a.CoreDisplayName()
+	coreName := model.CoreDisplayName(a.PM.Settings().CoreType)
 	a.CM.Stop()
 	a.coreOpMu.Unlock()
 	a.UpdateUI(func() {
@@ -1644,7 +1670,7 @@ func (a *App) Shutdown() {
 		}
 
 		a.sysproxyMu.Lock()
-		if s.SystemProxyEnabled || a.SettingsData.SystemProxyEnabled {
+		if s.SystemProxyEnabled {
 			_ = sysproxy.Disable()
 		}
 		a.sysproxyMu.Unlock()
@@ -1836,8 +1862,8 @@ func sortGroups(groups []model.ProxyGroup, mode model.ProxyMode) {
 	if len(groups) < 2 {
 		return
 	}
-	sort.SliceStable(groups, func(i, j int) bool {
-		return groupOrderRank(groups[i], mode) < groupOrderRank(groups[j], mode)
+	slices.SortStableFunc(groups, func(a, b model.ProxyGroup) int {
+		return cmp.Compare(groupOrderRank(a, mode), groupOrderRank(b, mode))
 	})
 }
 
@@ -1918,7 +1944,7 @@ func (a *App) ActivateProfile(id string) {
 
 // ImportClashLink adds a subscription opened by the OS to the profile library.
 func (a *App) ImportClashLink(raw string) {
-	a.Page = PageProfiles
+	a.SetActivePage(PageProfiles)
 	target, name, ok := profile.ParseClashInstallURL(raw)
 	if !ok {
 		a.Notify(a.Tr("无效的 Clash 订阅导入链接", "Invalid Clash subscription link"))
@@ -2056,6 +2082,75 @@ func (a *App) OpenRuntimePreview() {
 	a.EditorError = ""
 	a.EditorState = &editor.State{Buffer: buf}
 	a.ShowEditorModal = true
+}
+
+// SaveEditorProfileAsync validates and persists the currently open editor buffer off the UI thread.
+func (a *App) SaveEditorProfileAsync() {
+	if a.SavingEditor || a.EditorState == nil || a.EditorState.Buffer == nil || a.EditorReadOnly {
+		return
+	}
+	profileID := a.EditingProfileID
+	content := []byte(a.EditorState.Buffer.String())
+	coreFound := a.CoreInfo.Found
+	settings := a.PM.Settings()
+	prof, hasProf := a.FindProfile(profileID)
+
+	a.SavingEditor = true
+	a.EditorError = ""
+
+	go func() {
+		saveErr := a.PM.WriteProfileRaw(profileID, content)
+		if saveErr == nil && coreFound {
+			checkBytes := content
+			if hasProf {
+				compiled, cErr := profile.CompileForCore(content, prof, settings)
+				if cErr != nil {
+					saveErr = cErr
+				} else {
+					checkBytes = compiled
+				}
+			}
+			if saveErr == nil {
+				pattern := "livery-check-*.yaml"
+				if model.NormalizeCoreType(settings.CoreType) == model.CoreSingBox {
+					pattern = "livery-check-*.json"
+				}
+				if tmp, err := os.CreateTemp("", pattern); err == nil {
+					tmpPath := tmp.Name()
+					_, writeErr := tmp.Write(checkBytes)
+					closeErr := tmp.Close()
+					if writeErr != nil {
+						saveErr = writeErr
+					} else if closeErr != nil {
+						saveErr = closeErr
+					} else {
+						saveErr = a.CM.CheckConfig(tmpPath)
+					}
+					_ = os.Remove(tmpPath)
+				} else {
+					saveErr = err
+				}
+			}
+		}
+
+		a.UpdateUI(func() {
+			a.SavingEditor = false
+			if saveErr != nil {
+				if a.EditingProfileID == profileID {
+					a.EditorError = saveErr.Error()
+				}
+				return
+			}
+			a.Profiles = a.PM.Profiles()
+			if a.EditingProfileID == profileID {
+				a.ShowEditorModal = false
+			}
+			a.Notify(a.Tr("配置已保存", "Profile saved"))
+			if profileID == a.SettingsData.ActiveProfileID && a.CoreInfo.Status == model.CoreRunning {
+				a.ApplyProfileChanges()
+			}
+		})
+	}()
 }
 
 // FindProfile returns a profile by ID.

@@ -17,12 +17,7 @@ func Toggle(c *ui.Context, p theme.Palette, val *bool) ui.Element {
 		target = 1
 	}
 	pos := sw.AnimateTo("knob", target, ui.Snappy)
-	offBg := ui.RGBA(13, 13, 13, 0.20)
-	if p.Dark {
-		offBg = ui.RGBA(255, 255, 255, 0.22)
-	}
-	onBg := ui.Hex("#3B82F6")
-	sw.Background(offBg.Mix(onBg, pos))
+	sw.Background(p.ToggleOff.Mix(p.Accent, pos))
 	sw.Draw(func(pt *ui.Painter, r ui.Rect) {
 		const inset float32 = 2.5
 		d := r.H - 2*inset
@@ -33,7 +28,7 @@ func Toggle(c *ui.Context, p theme.Palette, val *bool) ui.Element {
 			H: d,
 		}
 		pt.Shadow(knob, d/2, 0, 1, 2.5, 0, ui.RGBA(0, 0, 0, 0.22))
-		pt.Fill(knob, ui.Hex("#FFFFFF"), d/2)
+		pt.Fill(knob, p.AccentForeground, d/2)
 	})
 	return sw
 }
@@ -78,6 +73,16 @@ func SwitchRow(c *ui.Context, p theme.Palette, s theme.TypeScale, key, title, su
 	return sw
 }
 
+// SettingRow renders a horizontal setting row with a left-aligned title and right-aligned trailing controls.
+func SettingRow(c *ui.Context, p theme.Palette, s theme.TypeScale, title string, trailing func()) {
+	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, title).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
+		if trailing != nil {
+			trailing()
+		}
+	})
+}
+
 // ModalShell renders a dialog overlay container following the dialog radius hierarchy.
 func ModalShell(c *ui.Context, p theme.Palette, open *bool, width float32, fn func()) ui.Element {
 	return ui.DialogBase(c, open, func(backdrop, panel ui.Element) {
@@ -93,4 +98,9 @@ func ModalShell(c *ui.Context, p theme.Palette, open *bool, width float32, fn fu
 			Shadow(0, 16, 40, 0, ui.RGBA(0, 0, 0, 0.25))
 		fn()
 	})
+}
+
+// ModalActions renders a right-aligned action footer row for modal dialogs.
+func ModalActions(c *ui.Context, fn func()) ui.Element {
+	return ui.Row(c).Gap(8).Justify(ui.End).Children(fn)
 }

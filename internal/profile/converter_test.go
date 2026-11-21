@@ -200,3 +200,44 @@ func TestConvertSingBoxToMihomo(t *testing.T) {
 		t.Fatalf("expected GEOIP,CN,DIRECT rule, got %+v", rules[2])
 	}
 }
+
+func TestDetectSubscriptionBase64AndURIs(t *testing.T) {
+	clashYAML := "proxies:\n  - name: n1\n    type: ss\n    server: 1.1.1.1\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n"
+	b64Clash := base64.StdEncoding.EncodeToString([]byte(clashYAML))
+	if _, format, ext, err := DetectAndNormalizeProfile([]byte(b64Clash), model.CoreMihomo); err != nil || format != "mihomo" || ext != ".yaml" {
+		t.Fatalf("base64 clash detect: format=%q ext=%q err=%v", format, ext, err)
+	}
+
+	b64SB := base64.StdEncoding.EncodeToString([]byte(`{"outbounds":[{"type":"direct","tag":"direct"}]}`))
+	if _, kind, err := ConvertToSingBox([]byte(b64SB)); err != nil || kind != "sing-box" {
+		t.Fatalf("base64 sing-box detect: kind=%q err=%v", kind, err)
+	}
+
+	links := "vless://11111111-1111-1111-1111-111111111111@v.example.com?security=reality&pbk=pub&sid=ab&alpn=h2,http/1.1&type=grpc&serviceName=svc#VL\n" +
+		"hy2://pw@h.example.com:8443?sni=h.example.com&insecure=1&obfs=salamander&obfs-password=opw#HY2\n" +
+		"tuic://uid:tpw@t.example.com:443?sni=t.example.com&alpn=h3&congestion_control=bbr&allow_insecure=1#TUIC\n"
+	out, kind, err := ConvertToSingBox([]byte(links))
+	if err != nil || kind != "uri" {
+		t.Fatalf("ConvertToSingBox URIs: kind=%q err=%v", kind, err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(toSlice(cfg["outbounds"])) != 6 { // proxy, auto, VL, HY2, TUIC, direct
+		t.Fatalf("expected 6 outbounds, got %d", len(toSlice(cfg["outbounds"])))
+	}
+}
+
+func TestAppendUniqueStrings(t *testing.T) {
+	got := appendUniqueStrings([]string{" Foo ", "", "bar"}, "FOO", "baz", " Bar ")
+	want := []string{"Foo", "bar", "baz"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}

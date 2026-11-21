@@ -178,18 +178,11 @@ func overviewQuickControlsRow(c *ui.Context, a *app.App, p theme.Palette, s them
 					ui.Text(c, a.Tr("出站模式", "Proxy Mode")).FontSize(s.SM).FontWeight(500).TextColor(p.ForegroundSubtle).SingleLine()
 				})
 
-				modeIdx := 0
-				switch a.SettingsData.ProxyMode {
-				case model.ModeGlobal:
-					modeIdx = 1
-				case model.ModeDirect:
-					modeIdx = 2
-				}
-				modes := []model.ProxyMode{model.ModeRule, model.ModeGlobal, model.ModeDirect}
-				labels := []string{a.Tr("规则", "Rule"), a.Tr("全局", "Global"), a.Tr("直连", "Direct")}
-				if components.Segmented(c.Key("ov-mode-seg"), p, s, &modeIdx, labels).FillEqually().Grow(1).Changed() {
-					a.SetProxyMode(modes[modeIdx])
-				}
+				components.SegmentedValue(c.Key("ov-mode-seg"), p, s, a.SettingsData.ProxyMode, []components.SegmentOption[model.ProxyMode]{
+					{Value: model.ModeRule, Label: a.Tr("规则", "Rule")},
+					{Value: model.ModeGlobal, Label: a.Tr("全局", "Global")},
+					{Value: model.ModeDirect, Label: a.Tr("直连", "Direct")},
+				}, a.SetProxyMode).FillEqually().Grow(1)
 			})
 		}).Padding(12, 16)
 
@@ -549,13 +542,7 @@ func steffenSlope(x0, y0, x1, y1, x2, y2 float32) float32 {
 	}
 	p := (s0*h1 + s1*h0) / (h0 + h1)
 	a0, a1, ap := abs32(s0), abs32(s1), 0.5*abs32(p)
-	lim := a0
-	if a1 < lim {
-		lim = a1
-	}
-	if ap < lim {
-		lim = ap
-	}
+	lim := min(a0, a1, ap)
 	if s0 < 0 {
 		return -2 * lim
 	}

@@ -121,3 +121,32 @@ func Segmented(c *ui.Context, p theme.Palette, s theme.TypeScale, selected *int,
 		})
 	return seg.Track
 }
+
+// SegmentOption pairs a typed option value with its display label in SegmentedValue.
+type SegmentOption[T comparable] struct {
+	Value T
+	Label string
+}
+
+// SegmentedValue renders a segmented control bound to a typed enum value.
+// Changes are dispatched via MyGo's OnChange notice hook so callers can safely chain
+// modifiers such as .Disabled(...) or .FillEqually().Grow(1) on the returned element.
+func SegmentedValue[T comparable](c *ui.Context, p theme.Palette, s theme.TypeScale, current T, opts []SegmentOption[T], onChange func(T)) ui.Element {
+	labels := make([]string, len(opts))
+	idx := 0
+	for i, opt := range opts {
+		labels[i] = opt.Label
+		if opt.Value == current {
+			idx = i
+		}
+	}
+	elem := Segmented(c, p, s, &idx, labels)
+	if onChange != nil {
+		elem.OnChange(func() {
+			if idx >= 0 && idx < len(opts) {
+				onChange(opts[idx].Value)
+			}
+		})
+	}
+	return elem
+}

@@ -1,9 +1,9 @@
 package pages
 
 import (
+	"cmp"
 	"context"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -21,18 +21,11 @@ func Proxies(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 	ui.Column(c).Fill().Padding(16).Gap(12).MinHeight(0).Children(func() {
 		// Top toolbar
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Wrap().Children(func() {
-			modeIdx := 0
-			switch a.SettingsData.ProxyMode {
-			case model.ModeGlobal:
-				modeIdx = 1
-			case model.ModeDirect:
-				modeIdx = 2
-			}
-			modes := []model.ProxyMode{model.ModeRule, model.ModeGlobal, model.ModeDirect}
-			modeLabels := []string{a.Tr("规则模式", "Rule"), a.Tr("全局模式", "Global"), a.Tr("直连模式", "Direct")}
-			if components.Segmented(c.Key("px-mode-seg"), p, s, &modeIdx, modeLabels).Changed() {
-				a.SetProxyMode(modes[modeIdx])
-			}
+			components.SegmentedValue(c.Key("px-mode-seg"), p, s, a.SettingsData.ProxyMode, []components.SegmentOption[model.ProxyMode]{
+				{Value: model.ModeRule, Label: a.Tr("规则模式", "Rule")},
+				{Value: model.ModeGlobal, Label: a.Tr("全局模式", "Global")},
+				{Value: model.ModeDirect, Label: a.Tr("直连模式", "Direct")},
+			}, a.SetProxyMode)
 
 			ui.SearchField(c.Key("proxy-search"), &a.ProxySearch).
 				Placeholder(a.Tr("搜索分组、节点或协议...", "Search groups or nodes...")).
@@ -341,22 +334,22 @@ func filteredSortedNodes(a *app.App, g model.ProxyGroup, q string, includeAllOnG
 	}
 	switch a.ProxySort {
 	case 1:
-		sort.SliceStable(out, func(i, j int) bool {
-			di := a.Nodes[out[i]].Delay
-			dj := a.Nodes[out[j]].Delay
+		slices.SortStableFunc(out, func(x, y string) int {
+			di := a.Nodes[x].Delay
+			dj := a.Nodes[y].Delay
 			if di <= 0 {
 				di = 999999
 			}
 			if dj <= 0 {
 				dj = 999999
 			}
-			if di != dj {
-				return di < dj
+			if c := cmp.Compare(di, dj); c != 0 {
+				return c
 			}
-			return out[i] < out[j]
+			return cmp.Compare(x, y)
 		})
 	case 2:
-		sort.Strings(out)
+		slices.Sort(out)
 	}
 	return out
 }
@@ -397,10 +390,10 @@ func proxyNodeTile(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale
 				ui.Box(c).
 					Size(18, 18).
 					Radius(theme.RadiusFull).
-					Background(ui.Hex("#3B82F6")).
+					Background(p.Accent).
 					Center().
 					Children(func() {
-						ui.Icon(c, icons.Check).FontSize(11).TextColor(ui.Hex("#FFFFFF"))
+						ui.Icon(c, icons.Check).FontSize(11).TextColor(p.AccentForeground)
 					})
 			}
 		})

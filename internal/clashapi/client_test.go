@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -282,5 +283,78 @@ func TestClientStreamMemory(t *testing.T) {
 	defer close404()
 	if err := c404.StreamMemory(context.Background(), func(int64) {}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("expected ErrUnsupported on 404, got %v", err)
+	}
+}
+
+func TestClientStreamsTrafficAndLogs(t *testing.T) {
+	longMsg := strings.Repeat("a", 80*1024)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/traffic", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintln(w, `{"up":123,"down":456}`)
+		_, _ = fmt.Fprintln(w, ``)
+		_, _ = fmt.Fprintln(w, `not-json`)
+	})
+	mux.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("level") != "info" {
+			t.Errorf("expected default level=info, got %q", r.URL.Query().Get("level"))
+		}
+		_, _ = fmt.Fprintln(w, `{"type":"INFO","payload":""}`)
+		_, _ = fmt.Fprintf(w, `{"type":"WARNING","payload":%q}`+"\n", longMsg)
+	})
+
+	c, closeFn := newMockClient(mux)
+	defer closeFn()
+
+	var samples []model.TrafficSample
+	if err := c.StreamTraffic(context.Background(), func(s model.TrafficSample) {
+		samples = append(samples, s)
+	}); err != nil {
+		t.Fatalf("StreamTraffic: %v", err)
+	}
+	if len(samples) != 1 || samples[0].Up != 123 || samples[0].Down != 456 {
+		t.Fatalf("unexpected traffic samples: %+v", samples)
+	}
+
+	var logs []model.LogEntry
+	if err := c.StreamLogs(context.Background(), "", func(e model.LogEntry) {
+		logs = append(logs, e)
+	}); err != nil {
+		t.Fatalf("StreamLogs: %v", err)
+	}
+	if len(logs) != 1 || logs[0].Level != "warning" || len(logs[0].Message) != len(longMsg) {
+		t.Fatalf("unexpected logs: count=%d", len(logs))
+	}
+}
+
+func TestGetProxiesGroupOrdering(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxies", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"proxies": map[string]any{
+				"GLOBAL": map[string]any{"name": "GLOBAL", "type": "Selector", "all": []string{"Second", "First"}},
+				"First":  map[string]any{"name": "First", "type": "URLTest", "all": []string{"n1"}},
+				"Second": map[string]any{"name": "Second", "type": "Selector", "all": []string{"n1"}},
+				"ExtraB": map[string]any{"name": "ExtraB", "type": "URLTest", "all": []string{"n1"}},
+				"ExtraA": map[string]any{"name": "ExtraA", "type": "Selector", "all": []string{"n1"}},
+				"ExtraC": map[string]any{"name": "ExtraC", "type": "URLTest", "all": []string{"n1"}},
+			},
+		})
+	})
+
+	c, closeFn := newMockClient(mux)
+	defer closeFn()
+
+	groups, _, err := c.GetProxies(context.Background())
+	if err != nil {
+		t.Fatalf("GetProxies: %v", err)
+	}
+	got := make([]string, len(groups))
+	for i, g := range groups {
+		got[i] = g.Name
+	}
+	want := []string{"Second", "First", "ExtraA", "ExtraB", "ExtraC", "GLOBAL"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("group order = %v, want %v", got, want)
 	}
 }

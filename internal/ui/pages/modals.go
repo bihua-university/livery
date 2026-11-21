@@ -3,7 +3,6 @@ package pages
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/bihua-university/livery/internal/app"
 	"github.com/bihua-university/livery/internal/icons"
 	"github.com/bihua-university/livery/internal/model"
-	"github.com/bihua-university/livery/internal/profile"
 	"github.com/bihua-university/livery/internal/theme"
 	"github.com/bihua-university/livery/internal/ui/components"
 )
@@ -67,7 +65,7 @@ func importModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 
 			ui.Checkbox(c.Key("imp-proxy"), &a.ImportUseProxy, a.Tr("通过当前本地代理端口下载", "Download via local proxy port"))
 		})
-		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+		components.ModalActions(c, func() {
 			if components.ActionButton(c, p, s, nil, a.Tr("取消", "Cancel")).Clicked() {
 				a.ShowImportModal = false
 			}
@@ -103,7 +101,7 @@ func newProfileModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeSca
 	components.ModalShell(c, p, &a.ShowNewProfileModal, 380, func() {
 		ui.Text(c, a.Tr("新建空白配置", "New Blank Profile")).FontSize(s.LG).FontWeight(600).TextColor(p.Foreground)
 		ui.TextInput(c.Key("new-prof-name"), &a.NewProfileName).Placeholder(a.Tr("配置名称", "Profile name")).AutoFocus().FillWidth()
-		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+		components.ModalActions(c, func() {
 			if components.ActionButton(c, p, s, nil, a.Tr("取消", "Cancel")).Clicked() {
 				a.ShowNewProfileModal = false
 			}
@@ -138,47 +136,17 @@ func editorModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) 
 				ed.ReadOnly(true)
 			}
 		})
-		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+		components.ModalActions(c, func() {
 			if components.ActionButton(c, p, s, nil, a.Tr("关闭", "Close")).Clicked() {
 				a.ShowEditorModal = false
 			}
 			if !a.EditorReadOnly {
-				if components.PrimaryActionButton(c, p, s, icons.Check, a.Tr("校验并保存", "Validate & Save")).Clicked() {
-					content := []byte(a.EditorState.Buffer.String())
-					if err := a.PM.WriteProfileRaw(a.EditingProfileID, content); err != nil {
-						a.EditorError = err.Error()
-						return
-					}
-					if a.CoreInfo.Found {
-						pattern := "livery-check-*.yaml"
-						if model.NormalizeCoreType(a.SettingsData.CoreType) == model.CoreSingBox {
-							pattern = "livery-check-*.json"
-						}
-						if tmp, err := os.CreateTemp("", pattern); err == nil {
-							tmpPath := tmp.Name()
-							_, _ = tmp.Write(content)
-							_ = tmp.Close()
-							defer os.Remove(tmpPath)
-							if prof, ok := a.FindProfile(a.EditingProfileID); ok {
-								compiled, cErr := profile.CompileForCore(content, prof, a.SettingsData)
-								if cErr != nil {
-									a.EditorError = cErr.Error()
-									return
-								}
-								_ = os.WriteFile(tmpPath, compiled, 0o644)
-							}
-							if checkErr := a.CM.CheckConfig(tmpPath); checkErr != nil {
-								a.EditorError = checkErr.Error()
-								return
-							}
-						}
-					}
-					a.Profiles = a.PM.Profiles()
-					a.ShowEditorModal = false
-					a.Notify(a.Tr("配置已保存", "Profile saved"))
-					if a.EditingProfileID == a.SettingsData.ActiveProfileID && a.CoreInfo.Status == model.CoreRunning {
-						a.ApplyProfileChanges()
-					}
+				saveLabel := a.Tr("校验并保存", "Validate & Save")
+				if a.SavingEditor {
+					saveLabel = a.Tr("校验中...", "Validating...")
+				}
+				if components.PrimaryActionButton(c, p, s, icons.Check, saveLabel).Disabled(a.SavingEditor).Clicked() {
+					a.SaveEditorProfileAsync()
 				}
 			}
 		})
@@ -212,7 +180,7 @@ func metaModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 			ui.Text(c, a.Tr("自定义 JSON/YAML Merge Patch (可选)", "Custom JSON/YAML Merge Patch (optional)")).FontSize(s.SM).TextColor(p.ForegroundSubtle)
 			ui.TextArea(c.Key("meta-patch"), &a.MetaDraft.Override.PatchJSON).Placeholder(`{"dns": {"strategy": "prefer_ipv4"}}`).Height(90).FillWidth()
 		})
-		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+		components.ModalActions(c, func() {
 			if components.ActionButton(c, p, s, nil, a.Tr("取消", "Cancel")).Clicked() {
 				a.ShowMetaModal = false
 			}
@@ -252,7 +220,7 @@ func ruleModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 
 			ui.Checkbox(c.Key("rule-prep-cb"), &a.DraftRulePrep, a.Tr("优先于订阅规则匹配 (前置)", "Higher priority than profile rules (Prepend)"))
 		})
-		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+		components.ModalActions(c, func() {
 			if components.ActionButton(c, p, s, nil, a.Tr("取消", "Cancel")).Clicked() {
 				a.ShowRuleModal = false
 			}
@@ -312,7 +280,7 @@ func connDetailModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeSca
 			components.KeyValueRow(c, p, s, a.Tr("代理链", "Chains"), strings.Join(conn.Chains, " → "), true)
 			components.KeyValueRow(c, p, s, a.Tr("流量", "Traffic"), fmt.Sprintf("↓ %s  ↑ %s", components.FormatBytes(conn.Download), components.FormatBytes(conn.Upload)), true)
 		})
-		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+		components.ModalActions(c, func() {
 			if components.ActionButton(c, p, s, nil, a.Tr("关闭窗口", "Close")).Clicked() {
 				a.ShowConnModal = false
 			}

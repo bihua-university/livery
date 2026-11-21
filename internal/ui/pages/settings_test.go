@@ -8,6 +8,7 @@ import (
 
 	"github.com/bihua-university/livery/internal/app"
 	"github.com/bihua-university/livery/internal/core"
+	"github.com/bihua-university/livery/internal/model"
 	"github.com/bihua-university/livery/internal/profile"
 	"github.com/bihua-university/livery/internal/theme"
 )
@@ -147,5 +148,40 @@ func TestSettingsTUNBypassPrivateRouteCheckbox(t *testing.T) {
 	}
 	if a.SettingsData.TUNBypassPrivateRoute {
 		t.Fatal("expected TUNBypassPrivateRoute to toggle false after click")
+	}
+}
+
+func TestSettingsSegmentedControls(t *testing.T) {
+	dir := t.TempDir()
+	pm, err := profile.NewManager(dir)
+	if err != nil {
+		t.Fatalf("profile.NewManager: %v", err)
+	}
+	cm := core.NewManager(dir, dir, nil, nil)
+	a := app.New(pm, cm)
+	t.Cleanup(a.Shutdown)
+
+	tester := ui.NewTester(func(c *ui.Context) {
+		p := theme.Light()
+		c.SetTheme(theme.BuildUITheme(p, a.SettingsData.UIFontSize))
+		Settings(c, a, p, theme.Scale(14))
+	}, 960, 900)
+
+	// Scroll to Appearance section and switch ThemeMode and CloseAction via SegmentedValue.
+	tester.Scroll(480, 450, 0, 1000)
+	tester.Scroll(480, 450, 0, 600)
+
+	if err := tester.Click("深色"); err != nil {
+		t.Fatalf("Click(深色): %v", err)
+	}
+	if a.SettingsData.ThemeMode != model.ThemeDark {
+		t.Fatalf("expected ThemeDark after click, got %q", a.SettingsData.ThemeMode)
+	}
+
+	if err := tester.Click("直接退出"); err != nil {
+		t.Fatalf("Click(直接退出): %v", err)
+	}
+	if a.SettingsData.CloseAction != model.CloseQuit {
+		t.Fatalf("expected CloseQuit after click, got %q", a.SettingsData.CloseAction)
 	}
 }

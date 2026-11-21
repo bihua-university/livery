@@ -72,7 +72,7 @@ func qualityModal(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale)
 				})
 			}
 		}
-		ui.Row(c).Justify(ui.End).Gap(8).Children(func() {
+		components.ModalActions(c, func() {
 			if components.ActionButton(c.Key("quality-retry"), p, s, nil, a.Tr("重新检测", "Check again")).Disabled(a.QualityChecking() || a.CoreInfo.Status != model.CoreRunning || a.IsCoreBusy()).Clicked() {
 				a.CheckQuality()
 			}

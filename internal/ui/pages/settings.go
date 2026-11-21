@@ -38,16 +38,11 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 					}
 				})
 
-				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, a.Tr("核心模式", "Core Engine")).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
-					coreIdx := 0
-					if coreType == model.CoreSingBox {
-						coreIdx = 1
-					}
-					cores := []model.CoreType{model.CoreMihomo, model.CoreSingBox}
-					if components.Segmented(c.Key("set-core-type-seg"), p, s, &coreIdx, []string{"Mihomo", "sing-box"}).Changed() {
-						a.SwitchCoreType(cores[coreIdx])
-					}
+				components.SettingRow(c, p, s, a.Tr("核心模式", "Core Engine"), func() {
+					components.SegmentedValue(c.Key("set-core-type-seg"), p, s, coreType, []components.SegmentOption[model.CoreType]{
+						{Value: model.CoreMihomo, Label: "Mihomo"},
+						{Value: model.CoreSingBox, Label: "sing-box"},
+					}, a.SwitchCoreType)
 				})
 
 				ui.Column(c).Gap(6).Children(func() {
@@ -62,10 +57,10 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 							a.CoreInfo = a.CM.RefreshBinaryInfo(*pathPtr)
 						}
 						if components.ActionButton(c, p, s, icons.Profiles, a.Tr("选文件", "File")).Clicked() {
-							go pickCoreBinary(a)
+							go pickCorePath(a, false)
 						}
 						if components.ActionButton(c, p, s, icons.Folder, a.Tr("选目录", "Folder")).Clicked() {
-							go pickCoreDir(a)
+							go pickCorePath(a, true)
 						}
 						if components.ActionButton(c, p, s, icons.Download, a.Tr("下载最新版", "Install Latest")).Disabled(a.InstallingCore).Clicked() {
 							a.StartInstallCore()
@@ -126,12 +121,14 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 							ui.Text(c, a.Tr("DNS 增强模式", "DNS enhanced mode")).FontSize(s.Base).TextColor(p.Foreground)
 							ui.Text(c, prof.Name).SingleLine().FontSize(s.XS).TextColor(p.ForegroundSubtle)
 						})
-						modes := []string{"", "fake-ip", "redir-host"}
-						idx := max(0, slices.Index(modes, prof.Override.DNSMode))
-						labels := []string{a.Tr("跟随配置", "Use profile"), "fake-ip", "redir-host"}
-						if components.Segmented(c.Key("set-dns-mode-"+prof.ID), p, s, &idx, labels).Disabled(a.SavingDNSMode || a.IsCoreBusy()).Changed() {
-							a.SetDNSMode(prof.ID, modes[idx])
-						}
+						profID := prof.ID
+						components.SegmentedValue(c.Key("set-dns-mode-"+profID), p, s, prof.Override.DNSMode, []components.SegmentOption[string]{
+							{Value: "", Label: a.Tr("跟随配置", "Use profile")},
+							{Value: "fake-ip", Label: "fake-ip"},
+							{Value: "redir-host", Label: "redir-host"},
+						}, func(mode string) {
+							a.SetDNSMode(profID, mode)
+						}).Disabled(a.SavingDNSMode || a.IsCoreBusy())
 					})
 				}
 
@@ -152,38 +149,42 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 			if model.NormalizeCoreType(a.SettingsData.CoreType) == model.CoreMihomo {
 				components.Card(c, p, func() {
 					components.SectionHeader(c, p, s, a.Tr("Mihomo 基础选项", "Mihomo options"), nil)
-					boolLabels := []string{a.Tr("跟随配置", "Use profile"), a.Tr("开启", "On"), a.Tr("关闭", "Off")}
+					useProfileLabel := a.Tr("跟随配置", "Use profile")
+					boolOpts := []components.SegmentOption[boolOverride]{
+						{Value: boolOverrideDefault, Label: useProfileLabel},
+						{Value: boolOverrideOn, Label: a.Tr("开启", "On")},
+						{Value: boolOverrideOff, Label: a.Tr("关闭", "Off")},
+					}
 					boolRow := func(key, label string, value *bool, set func(*model.AppSettings, *bool)) {
-						idx := 0
+						cur := boolOverrideDefault
 						if value != nil {
-							idx = 2
 							if *value {
-								idx = 1
+								cur = boolOverrideOn
+							} else {
+								cur = boolOverrideOff
 							}
 						}
-						ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-							ui.Text(c, label).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
-							if components.Segmented(c.Key(key), p, s, &idx, boolLabels).Disabled(a.SavingPreference || a.IsCoreBusy()).Changed() {
+						components.SettingRow(c, p, s, label, func() {
+							components.SegmentedValue(c.Key(key), p, s, cur, boolOpts, func(choice boolOverride) {
 								var override *bool
-								if idx > 0 {
-									on := idx == 1
+								if choice != boolOverrideDefault {
+									on := choice == boolOverrideOn
 									override = &on
 								}
 								a.SavePreference(func(s *model.AppSettings) { set(s, override) }, a.ApplyProfileChanges)
-							}
+							}).Disabled(a.SavingPreference || a.IsCoreBusy())
 						})
 					}
 					boolRow("set-tcp-concurrent", a.Tr("TCP 并发连接", "Concurrent TCP connections"), a.SettingsData.TCPConcurrent, func(s *model.AppSettings, v *bool) { s.TCPConcurrent = v })
 					boolRow("set-ipv6", "IPv6", a.SettingsData.IPv6, func(s *model.AppSettings, v *bool) { s.IPv6 = v })
-					ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-						ui.Text(c, a.Tr("Geo 数据加载器", "Geo data loader")).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
-						values := []string{"", "standard", "memconservative"}
-						idx := max(0, slices.Index(values, a.SettingsData.GeoDataLoader))
-						labels := []string{boolLabels[0], a.Tr("标准", "Standard"), a.Tr("低内存", "Low memory")}
-						if components.Segmented(c.Key("set-geodata-loader"), p, s, &idx, labels).Disabled(a.SavingPreference || a.IsCoreBusy()).Changed() {
-							loader := values[idx]
+					components.SettingRow(c, p, s, a.Tr("Geo 数据加载器", "Geo data loader"), func() {
+						components.SegmentedValue(c.Key("set-geodata-loader"), p, s, a.SettingsData.GeoDataLoader, []components.SegmentOption[string]{
+							{Value: "", Label: useProfileLabel},
+							{Value: "standard", Label: a.Tr("标准", "Standard")},
+							{Value: "memconservative", Label: a.Tr("低内存", "Low memory")},
+						}, func(loader string) {
 							a.SavePreference(func(s *model.AppSettings) { s.GeoDataLoader = loader }, a.ApplyProfileChanges)
-						}
+						}).Disabled(a.SavingPreference || a.IsCoreBusy())
 					})
 				})
 				components.Card(c, p, func() {
@@ -213,20 +214,20 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 				if a.SettingsData.ProxyGuard {
 					ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 						ui.Text(c, a.Tr("守卫检查间隔", "Guard Check Interval")).FontSize(s.SM).TextColor(p.ForegroundSubtle).Grow(1)
-						intervals := []int{5, 10, 30, 60}
-						labels := []string{"5s", "10s", "30s", "60s"}
-						idx := 1
-						for i, v := range intervals {
-							if a.SettingsData.ProxyGuardInterval == v {
-								idx = i
-								break
-							}
+						cur := a.SettingsData.ProxyGuardInterval
+						if !slices.Contains([]int{5, 10, 30, 60}, cur) {
+							cur = 10
 						}
-						if components.Segmented(c.Key("set-guard-interval"), p, s, &idx, labels).Changed() {
-							a.SettingsData.ProxyGuardInterval = intervals[idx]
+						components.SegmentedValue(c.Key("set-guard-interval"), p, s, cur, []components.SegmentOption[int]{
+							{Value: 5, Label: "5s"},
+							{Value: 10, Label: "10s"},
+							{Value: 30, Label: "30s"},
+							{Value: 60, Label: "60s"},
+						}, func(interval int) {
+							a.SettingsData.ProxyGuardInterval = interval
 							a.ApplySettings(false)
 							a.WakeProxyGuard()
-						}
+						})
 					})
 				}
 
@@ -417,24 +418,15 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 			components.Card(c, p, func() {
 				ui.Text(c, a.Tr("外观与桌面行为", "Appearance & Behavior")).FontSize(s.Base).FontWeight(600).TextColor(p.Foreground)
 
-				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, a.Tr("主题模式", "Theme Mode")).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
-					themeIdx := 0
-					switch a.SettingsData.ThemeMode {
-					case model.ThemeLight:
-						themeIdx = 1
-					case model.ThemeDark:
-						themeIdx = 2
-					}
-					modes := []model.ThemeMode{model.ThemeSystem, model.ThemeLight, model.ThemeDark}
-					labels := []string{a.Tr("跟随系统", "System"), a.Tr("浅色", "Light"), a.Tr("深色", "Dark")}
-					if components.Segmented(c.Key("set-theme-seg"), p, s, &themeIdx, labels).Changed() {
-						a.SetThemeMode(modes[themeIdx])
-					}
+				components.SettingRow(c, p, s, a.Tr("主题模式", "Theme Mode"), func() {
+					components.SegmentedValue(c.Key("set-theme-seg"), p, s, a.SettingsData.ThemeMode, []components.SegmentOption[model.ThemeMode]{
+						{Value: model.ThemeSystem, Label: a.Tr("跟随系统", "System")},
+						{Value: model.ThemeLight, Label: a.Tr("浅色", "Light")},
+						{Value: model.ThemeDark, Label: a.Tr("深色", "Dark")},
+					}, a.SetThemeMode)
 				})
 
-				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, a.Tr("界面字号", "UI Font Size")).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
+				components.SettingRow(c, p, s, a.Tr("界面字号", "UI Font Size"), func() {
 					ui.Text(c, fmt.Sprintf("%.0f px", a.UIFontDraft)).FontSize(s.SM).Font(theme.MonoFont()).FontFeatures("tnum").TextColor(p.ForegroundSubtle)
 					if ui.Slider(c.Key("set-font-size"), &a.UIFontDraft, 12, 16).Step(1).Width(160).Changed() {
 						a.SettingsData.UIFontSize = float32(a.UIFontDraft)
@@ -442,39 +434,30 @@ func Settings(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale) {
 					}
 				})
 
-				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, a.Tr("界面语言", "Language")).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
-					langIdx := 0
-					if a.SettingsData.Language == model.LangEN {
-						langIdx = 1
-					}
-					if components.Segmented(c.Key("set-lang-seg"), p, s, &langIdx, []string{"简体中文", "English"}).Changed() {
-						if langIdx == 1 {
-							a.SettingsData.Language = model.LangEN
+				components.SettingRow(c, p, s, a.Tr("界面语言", "Language"), func() {
+					components.SegmentedValue(c.Key("set-lang-seg"), p, s, a.SettingsData.Language, []components.SegmentOption[model.LanguageMode]{
+						{Value: model.LangZH, Label: "简体中文"},
+						{Value: model.LangEN, Label: "English"},
+					}, func(lang model.LanguageMode) {
+						a.SettingsData.Language = lang
+						if lang == model.LangEN {
 							mygo.App.SetLocale("en")
 						} else {
-							a.SettingsData.Language = model.LangZH
 							mygo.App.SetLocale("zh-Hans")
 						}
 						_ = a.PM.SaveSettings(a.SettingsData)
 						a.RefreshTray()
-					}
+					})
 				})
 
-				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, a.Tr("关闭主窗口时", "On Window Close")).FontSize(s.Base).TextColor(p.Foreground).Grow(1)
-					closeIdx := 0
-					if a.SettingsData.CloseAction == model.CloseQuit {
-						closeIdx = 1
-					}
-					if components.Segmented(c.Key("set-close-seg"), p, s, &closeIdx, []string{a.Tr("最小化到托盘", "Hide to Tray"), a.Tr("直接退出", "Quit App")}).Changed() {
-						if closeIdx == 1 {
-							a.SettingsData.CloseAction = model.CloseQuit
-						} else {
-							a.SettingsData.CloseAction = model.CloseToTray
-						}
+				components.SettingRow(c, p, s, a.Tr("关闭主窗口时", "On Window Close"), func() {
+					components.SegmentedValue(c.Key("set-close-seg"), p, s, a.SettingsData.CloseAction, []components.SegmentOption[model.CloseAction]{
+						{Value: model.CloseToTray, Label: a.Tr("最小化到托盘", "Hide to Tray")},
+						{Value: model.CloseQuit, Label: a.Tr("直接退出", "Quit App")},
+					}, func(action model.CloseAction) {
+						a.SettingsData.CloseAction = action
 						_ = a.PM.SaveSettings(a.SettingsData)
-					}
+					})
 				})
 
 				ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
@@ -596,12 +579,28 @@ func commitNumericSettings(a *app.App) {
 	}
 }
 
-func pickCoreBinary(a *app.App) {
+type boolOverride uint8
+
+const (
+	boolOverrideDefault boolOverride = iota
+	boolOverrideOn
+	boolOverrideOff
+)
+
+func pickCorePath(a *app.App, dir bool) {
 	targetCore := model.NormalizeCoreType(a.SettingsData.CoreType)
-	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+	opts := mygo.OpenDialogOptions{
 		Parent: a.Window(),
 		Title:  fmt.Sprintf(a.Tr("选择 %s 可执行文件", "Select %s executable"), model.CoreDisplayName(targetCore)),
-	})
+	}
+	notifyMsg := a.Tr("已更新核心路径", "Core path updated")
+	if dir {
+		opts.Title = fmt.Sprintf(a.Tr("选择 %s 核心存放目录", "Select %s core directory"), model.CoreDisplayName(targetCore))
+		opts.Directory = true
+		opts.CreateDirectories = true
+		notifyMsg = a.Tr("已更新核心目录", "Core directory updated")
+	}
+	paths, err := mygo.Dialog.Open(opts)
 	if err != nil || len(paths) == 0 {
 		return
 	}
@@ -611,28 +610,7 @@ func pickCoreBinary(a *app.App) {
 		if a.SettingsData.CoreType == targetCore {
 			a.CoreInfo = a.CM.RefreshBinaryInfo(paths[0])
 		}
-		a.Notify(a.Tr("已更新核心路径", "Core path updated"))
-	})
-}
-
-func pickCoreDir(a *app.App) {
-	targetCore := model.NormalizeCoreType(a.SettingsData.CoreType)
-	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
-		Parent:            a.Window(),
-		Title:             fmt.Sprintf(a.Tr("选择 %s 核心存放目录", "Select %s core directory"), model.CoreDisplayName(targetCore)),
-		Directory:         true,
-		CreateDirectories: true,
-	})
-	if err != nil || len(paths) == 0 {
-		return
-	}
-	a.UpdateUI(func() {
-		a.SettingsData.SetCorePathFor(targetCore, paths[0])
-		_ = a.PM.SaveSettings(a.SettingsData)
-		if a.SettingsData.CoreType == targetCore {
-			a.CoreInfo = a.CM.RefreshBinaryInfo(paths[0])
-		}
-		a.Notify(a.Tr("已更新核心目录", "Core directory updated"))
+		a.Notify(notifyMsg)
 	})
 }
 

@@ -3,6 +3,7 @@ package clashapi
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,7 +33,7 @@ type Client struct {
 // New creates a Clash API client targeting host:port with an optional bearer secret.
 func New(host string, port int, secret string) *Client {
 	if host == "" {
-		host = "127.0.0.1"
+		host = model.DefaultClashAPIHost
 	}
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
 	return &Client{
@@ -354,26 +355,33 @@ func (c *Client) GetProxies(ctx context.Context) ([]model.ProxyGroup, map[string
 		}
 	}
 
+	globalRank := func(name string) int {
+		if name == "GLOBAL" {
+			return 1
+		}
+		return 0
+	}
+	orderRank := func(name string) int {
+		if idx, ok := orderIdx[name]; ok {
+			return idx
+		}
+		return len(orderIdx)
+	}
+	selectorRank := func(typ string) int {
+		if strings.EqualFold(typ, "Selector") {
+			return 0
+		}
+		return 1
+	}
+
 	// Keep GLOBAL last and sort other groups by config order, then Selector first, then name.
-	sort.Slice(groups, func(i, j int) bool {
-		gi, gj := groups[i], groups[j]
-		if gi.Name == "GLOBAL" || gj.Name == "GLOBAL" {
-			return gj.Name == "GLOBAL" && gi.Name != "GLOBAL"
-		}
-		oi, hasI := orderIdx[gi.Name]
-		oj, hasJ := orderIdx[gj.Name]
-		if hasI && hasJ && oi != oj {
-			return oi < oj
-		}
-		if hasI != hasJ {
-			return hasI
-		}
-		si := strings.EqualFold(gi.Type, "Selector")
-		sj := strings.EqualFold(gj.Type, "Selector")
-		if si != sj {
-			return si
-		}
-		return gi.Name < gj.Name
+	slices.SortFunc(groups, func(a, b model.ProxyGroup) int {
+		return cmp.Or(
+			cmp.Compare(globalRank(a.Name), globalRank(b.Name)),
+			cmp.Compare(orderRank(a.Name), orderRank(b.Name)),
+			cmp.Compare(selectorRank(a.Type), selectorRank(b.Type)),
+			cmp.Compare(a.Name, b.Name),
+		)
 	})
 
 	return groups, nodes, nil
@@ -398,10 +406,10 @@ func (c *Client) delayRequest(ctx context.Context, path string, timeout time.Dur
 // TestDelay measures latency (ms) of a single proxy node.
 func (c *Client) TestDelay(ctx context.Context, proxyName, testURL string, timeoutMs int) (int, error) {
 	if testURL == "" {
-		testURL = "http://www.gstatic.com/generate_204"
+		testURL = model.DefaultDelayTestURL
 	}
 	if timeoutMs <= 0 {
-		timeoutMs = 5000
+		timeoutMs = model.DefaultDelayTestTimeoutMs
 	}
 	q := url.Values{}
 	q.Set("url", testURL)
@@ -424,10 +432,10 @@ func (c *Client) TestDelay(ctx context.Context, proxyName, testURL string, timeo
 // TestGroupDelay tests all members of a proxy group concurrently via Clash API.
 func (c *Client) TestGroupDelay(ctx context.Context, groupName, testURL string, timeoutMs int) (map[string]int, error) {
 	if testURL == "" {
-		testURL = "http://www.gstatic.com/generate_204"
+		testURL = model.DefaultDelayTestURL
 	}
 	if timeoutMs <= 0 {
-		timeoutMs = 5000
+		timeoutMs = model.DefaultDelayTestTimeoutMs
 	}
 	q := url.Values{}
 	q.Set("url", testURL)
@@ -491,35 +499,49 @@ func (c *Client) GetRules(ctx context.Context) ([]model.RuleEntry, error) {
 	return res.Rules, nil
 }
 
-// StreamTraffic reads the newline-delimited JSON stream from /traffic until ctx is canceled.
-func (c *Client) StreamTraffic(ctx context.Context, onSample func(model.TrafficSample)) error {
-	resp, err := c.doStream(ctx, "/traffic")
+func streamNDJSON[T any](ctx context.Context, c *Client, name, path string, maxBuf int, checkUnsupported bool, onItem func(T)) error {
+	resp, err := c.doStream(ctx, path)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if checkUnsupported && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented) {
+		return ErrUnsupported
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("traffic stream HTTP %d", resp.StatusCode)
+		return fmt.Errorf("%s stream HTTP %d", name, resp.StatusCode)
 	}
 	scanner := bufio.NewScanner(resp.Body)
+	if maxBuf > 0 {
+		buf := make([]byte, 0, min(64*1024, maxBuf))
+		scanner.Buffer(buf, maxBuf)
+	}
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
-		var payload struct {
-			Up   int64 `json:"up"`
-			Down int64 `json:"down"`
-		}
-		if json.Unmarshal(line, &payload) == nil {
-			onSample(model.TrafficSample{
-				Timestamp: time.Now(),
-				Up:        payload.Up,
-				Down:      payload.Down,
-			})
+		var item T
+		if json.Unmarshal(line, &item) == nil {
+			onItem(item)
 		}
 	}
 	return scanner.Err()
+}
+
+// StreamTraffic reads the newline-delimited JSON stream from /traffic until ctx is canceled.
+func (c *Client) StreamTraffic(ctx context.Context, onSample func(model.TrafficSample)) error {
+	type trafficPayload struct {
+		Up   int64 `json:"up"`
+		Down int64 `json:"down"`
+	}
+	return streamNDJSON(ctx, c, "traffic", "/traffic", 0, false, func(payload trafficPayload) {
+		onSample(model.TrafficSample{
+			Timestamp: time.Now(),
+			Up:        payload.Up,
+			Down:      payload.Down,
+		})
+	})
 }
 
 // StreamLogs reads the newline-delimited JSON stream from /logs until ctx is canceled.
@@ -527,27 +549,12 @@ func (c *Client) StreamLogs(ctx context.Context, level string, onLog func(model.
 	if level == "" {
 		level = "info"
 	}
-	resp, err := c.doStream(ctx, "/logs?level="+url.QueryEscape(level))
-	if err != nil {
-		return err
+	type logPayload struct {
+		Type    string `json:"type"`
+		Payload string `json:"payload"`
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("logs stream HTTP %d", resp.StatusCode)
-	}
-	scanner := bufio.NewScanner(resp.Body)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var payload struct {
-			Type    string `json:"type"`
-			Payload string `json:"payload"`
-		}
-		if json.Unmarshal(line, &payload) == nil && payload.Payload != "" {
+	return streamNDJSON(ctx, c, "logs", "/logs?level="+url.QueryEscape(level), 1024*1024, false, func(payload logPayload) {
+		if payload.Payload != "" {
 			onLog(model.LogEntry{
 				Time:    time.Now(),
 				Level:   strings.ToLower(payload.Type),
@@ -555,43 +562,23 @@ func (c *Client) StreamLogs(ctx context.Context, level string, onLog func(model.
 				Message: payload.Payload,
 			})
 		}
-	}
-	return scanner.Err()
+	})
 }
 
 // StreamMemory reads the newline-delimited JSON stream from /memory until ctx is canceled.
 // Mihomo reports core memory via /memory ({"inuse":..., "oslimit":...}) rather than /connections.
 func (c *Client) StreamMemory(ctx context.Context, onMemory func(int64)) error {
-	resp, err := c.doStream(ctx, "/memory")
-	if err != nil {
-		return err
+	type memoryPayload struct {
+		Inuse     int64 `json:"inuse"`
+		Footprint int64 `json:"footprint"`
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
-		return ErrUnsupported
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("memory stream HTTP %d", resp.StatusCode)
-	}
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
+	return streamNDJSON(ctx, c, "memory", "/memory", 0, true, func(payload memoryPayload) {
+		mem := payload.Inuse
+		if mem <= 0 {
+			mem = payload.Footprint
 		}
-		var payload struct {
-			Inuse     int64 `json:"inuse"`
-			Footprint int64 `json:"footprint"`
+		if mem > 0 {
+			onMemory(mem)
 		}
-		if json.Unmarshal(line, &payload) == nil {
-			mem := payload.Inuse
-			if mem <= 0 {
-				mem = payload.Footprint
-			}
-			if mem > 0 {
-				onMemory(mem)
-			}
-		}
-	}
-	return scanner.Err()
+	})
 }

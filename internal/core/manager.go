@@ -318,6 +318,7 @@ func (m *Manager) Start(configPath string) error {
 		return errors.New("core manager is shutting down")
 	}
 	m.startCancel = startCancel
+	cp := m.customPath
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -326,7 +327,7 @@ func (m *Manager) Start(configPath string) error {
 		startCancel()
 	}()
 
-	info := m.RefreshBinaryInfo(m.customPath)
+	info := m.RefreshBinaryInfo(cp)
 	ct := model.NormalizeCoreType(info.CoreType)
 	coreName := model.CoreDisplayName(ct)
 	if !info.Found {
@@ -638,12 +639,4 @@ func (m *Manager) pipeLogs(r io.Reader, defaultLevel string) {
 		}
 		m.emitLog(level, line)
 	}
-}
-
-// FormatError cleanly formats errors for UI display.
-func FormatError(err error) string {
-	if err == nil {
-		return ""
-	}
-	return fmt.Sprintf("%v", err)
 }

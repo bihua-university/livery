@@ -16,6 +16,7 @@ import (
 
 // View renders the main window shell (sidebar, inset rounded workspace, header with window controls, modals, toasts).
 func View(c *ui.Context, a *app.App) {
+	a.SyncActivePage()
 	hidden := c.WindowHidden()
 	wasHidden := a.WindowHidden.Swap(hidden)
 	a.SetOverviewVisible(!hidden && a.Page == app.PageOverview)
@@ -133,6 +134,7 @@ func buildSidebar(c *ui.Context, a *app.App, p theme.Palette, s theme.TypeScale,
 		}
 
 		components.SlidingNav(c, p, s, navItems, &a.Page)
+		a.SyncActivePage()
 	})
 }
 

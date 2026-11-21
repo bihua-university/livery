@@ -18,17 +18,6 @@ func Card(c *ui.Context, p theme.Palette, fn func()) ui.Element {
 		Children(fn)
 }
 
-// SurfacePanel renders a low-elevation surface container.
-func SurfacePanel(c *ui.Context, p theme.Palette, fn func()) ui.Element {
-	return ui.Column(c).
-		Background(p.Surface).
-		Border(1, p.Border).
-		Radius(theme.RadiusLG).
-		Padding(12).
-		Gap(8).
-		Children(fn)
-}
-
 // SectionHeader renders a card or section title with an optional trailing widget.
 func SectionHeader(c *ui.Context, p theme.Palette, s theme.TypeScale, title string, trailing func()) {
 	ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
@@ -36,18 +25,6 @@ func SectionHeader(c *ui.Context, p theme.Palette, s theme.TypeScale, title stri
 		if trailing != nil {
 			trailing()
 		}
-	})
-}
-
-// MetricCard renders a dense telemetry KPI card with title, monospace value, and subtitle.
-func MetricCard(c *ui.Context, p theme.Palette, s theme.TypeScale, title, value, sub string, icon *ui.SVG, accent ui.Color) {
-	Card(c, p, func() {
-		ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Text(c, title).FontSize(s.SM).TextColor(p.ForegroundSubtle).Grow(1).SingleLine()
-			ui.Icon(c, icon).FontSize(14).TextColor(accent)
-		})
-		ui.Text(c, value).FontSize(s.XL).FontWeight(600).Font(theme.MonoFont()).FontFeatures("tnum").TextColor(p.Foreground).SingleLine()
-		ui.Text(c, sub).FontSize(s.XS).Font(theme.MonoFont()).FontFeatures("tnum").TextColor(p.ForegroundSubtlest).SingleLine()
 	})
 }
 

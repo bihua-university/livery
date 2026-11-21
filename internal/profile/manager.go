@@ -22,7 +22,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bihua-university/livery/internal/model"
-	"github.com/bihua-university/livery/internal/sysproxy"
 )
 
 // Manager handles persistent storage for AppSettings, Profiles, and compiled runtime config.
@@ -283,11 +282,7 @@ func (m *Manager) CreateBlank(name string) (model.Profile, error) {
 		Format:          format,
 		UpdatedAt:       time.Now(),
 		UpdateIntervalH: 24,
-		Override: model.ProfileOverride{
-			OverrideInbounds: true,
-			InjectClashAPI:   true,
-			OverrideLog:      true,
-		},
+		Override:        model.DefaultProfileOverride(),
 	}
 	if err := os.WriteFile(m.ProfilePath(p), []byte(starter), 0o644); err != nil {
 		return model.Profile{}, err
@@ -322,11 +317,7 @@ func (m *Manager) ImportLocal(name, srcPath string) (model.Profile, error) {
 		Format:          format,
 		UpdatedAt:       time.Now(),
 		UpdateIntervalH: 24,
-		Override: model.ProfileOverride{
-			OverrideInbounds: true,
-			InjectClashAPI:   true,
-			OverrideLog:      true,
-		},
+		Override:        model.DefaultProfileOverride(),
 	}
 	if err := os.WriteFile(m.ProfilePath(p), data, 0o644); err != nil {
 		return model.Profile{}, err
@@ -359,24 +350,20 @@ func (m *Manager) ImportRemote(ctx context.Context, name, rawURL, userAgent stri
 		UpdateIntervalH: 24,
 		UseProxyUpdate:  useProxy,
 		FileName:        id + ".yaml",
-		Override: model.ProfileOverride{
-			OverrideInbounds: true,
-			InjectClashAPI:   true,
-			OverrideLog:      true,
-		},
+		Override:        model.DefaultProfileOverride(),
 	}
-	body, usage, fetchedName, format, ext, err := m.fetchRemote(ctx, p)
+	res, err := m.fetchRemote(ctx, p)
 	if err != nil {
 		return model.Profile{}, err
 	}
-	if name == u.Host && fetchedName != "" {
-		p.Name = fetchedName
+	if name == u.Host && res.name != "" {
+		p.Name = res.name
 	}
-	p.Format = format
-	p.FileName = id + ext
-	p.Usage = usage
+	p.Format = res.format
+	p.FileName = id + res.ext
+	p.Usage = res.usage
 	p.UpdatedAt = time.Now()
-	if err := os.WriteFile(m.ProfilePath(p), body, 0o644); err != nil {
+	if err := os.WriteFile(m.ProfilePath(p), res.body, 0o644); err != nil {
 		return model.Profile{}, err
 	}
 	m.mu.Lock()
@@ -395,7 +382,7 @@ func (m *Manager) RefreshRemote(ctx context.Context, id string) (model.Profile, 
 	if p.Kind != "remote" || p.URL == "" {
 		return model.Profile{}, errors.New("profile is not a remote subscription")
 	}
-	body, usage, _, format, ext, err := m.fetchRemote(ctx, p)
+	res, err := m.fetchRemote(ctx, p)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.profiles {
@@ -406,17 +393,17 @@ func (m *Manager) RefreshRemote(ctx context.Context, id string) (model.Profile, 
 				return m.profiles[i], err
 			}
 			oldPath := m.ProfilePath(m.profiles[i])
-			newFileName := m.profiles[i].ID + ext
+			newFileName := m.profiles[i].ID + res.ext
 			m.profiles[i].FileName = newFileName
-			m.profiles[i].Format = format
+			m.profiles[i].Format = res.format
 			newPath := m.ProfilePath(m.profiles[i])
-			if wErr := os.WriteFile(newPath, body, 0o644); wErr != nil {
+			if wErr := os.WriteFile(newPath, res.body, 0o644); wErr != nil {
 				return m.profiles[i], wErr
 			}
 			if oldPath != newPath {
 				_ = os.Remove(oldPath)
 			}
-			m.profiles[i].Usage = usage
+			m.profiles[i].Usage = res.usage
 			m.profiles[i].UpdatedAt = time.Now()
 			m.profiles[i].LastError = ""
 			_ = m.saveProfilesLocked()
@@ -531,7 +518,15 @@ func (m *Manager) ActiveRules() []model.RuleEntry {
 	return ParseRulesFromConfig(compiled)
 }
 
-func (m *Manager) fetchRemote(ctx context.Context, p model.Profile) ([]byte, model.SubscriptionInfo, string, string, string, error) {
+type remoteFetchResult struct {
+	body   []byte
+	usage  model.SubscriptionInfo
+	name   string
+	format string
+	ext    string
+}
+
+func (m *Manager) fetchRemote(ctx context.Context, p model.Profile) (remoteFetchResult, error) {
 	s := m.Settings()
 	tr := &http.Transport{Proxy: nil}
 	defer tr.CloseIdleConnections()
@@ -543,7 +538,7 @@ func (m *Manager) fetchRemote(ctx context.Context, p model.Profile) ([]byte, mod
 	client := &http.Client{Transport: tr, Timeout: 25 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.URL, nil)
 	if err != nil {
-		return nil, model.SubscriptionInfo{}, "", "", "", err
+		return remoteFetchResult{}, err
 	}
 	ua := strings.TrimSpace(p.UserAgent)
 	if ua == "" {
@@ -557,23 +552,27 @@ func (m *Manager) fetchRemote(ctx context.Context, p model.Profile) ([]byte, mod
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, model.SubscriptionInfo{}, "", "", "", err
+		return remoteFetchResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, model.SubscriptionInfo{}, "", "", "", fmt.Errorf("HTTP %d fetching subscription", resp.StatusCode)
+		return remoteFetchResult{}, fmt.Errorf("HTTP %d fetching subscription", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return nil, model.SubscriptionInfo{}, "", "", "", err
+		return remoteFetchResult{}, err
 	}
 	formatted, format, ext, err := DetectAndNormalizeProfile(body, s.CoreType)
 	if err != nil {
-		return nil, model.SubscriptionInfo{}, "", "", "", err
+		return remoteFetchResult{}, err
 	}
-	usage := parseUserInfo(resp.Header.Get("Subscription-Userinfo"))
-	fname := parseContentDispositionName(resp.Header.Get("Content-Disposition"))
-	return formatted, usage, fname, format, ext, nil
+	return remoteFetchResult{
+		body:   formatted,
+		usage:  parseUserInfo(resp.Header.Get("Subscription-Userinfo")),
+		name:   parseContentDispositionName(resp.Header.Get("Content-Disposition")),
+		format: format,
+		ext:    ext,
+	}, nil
 }
 
 func parseUserInfo(hdr string) model.SubscriptionInfo {
@@ -603,10 +602,8 @@ func parseUserInfo(hdr string) model.SubscriptionInfo {
 
 func parseContentDispositionName(hdr string) string {
 	for _, part := range strings.Split(hdr, ";") {
-		part = strings.TrimSpace(part)
-		if after, ok := strings.CutPrefix(strings.ToLower(part), "filename="); ok {
-			_ = after
-			_, v, _ := strings.Cut(part, "=")
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && strings.EqualFold(k, "filename") {
 			v = strings.Trim(v, `" '`)
 			return strings.TrimSuffix(v, filepath.Ext(v))
 		}
@@ -630,69 +627,11 @@ func (m *Manager) loadSettings() error {
 	if err != nil {
 		return err
 	}
-	def := model.DefaultSettings()
-	s := def
+	s := model.DefaultSettings()
 	if err := json.Unmarshal(b, &s); err != nil {
 		return err
 	}
-	s.CoreType = model.NormalizeCoreType(s.CoreType)
-	if s.ClashAPIPort <= 0 {
-		s.ClashAPIPort = def.ClashAPIPort
-	}
-	if s.ClashAPIHost == "" {
-		s.ClashAPIHost = def.ClashAPIHost
-	}
-	if s.MixedPort <= 0 {
-		s.MixedPort = def.MixedPort
-	}
-	if s.DelayTestURL == "" {
-		s.DelayTestURL = def.DelayTestURL
-	}
-	if s.DelayTestTimeoutMs <= 0 {
-		s.DelayTestTimeoutMs = def.DelayTestTimeoutMs
-	}
-	if s.TUNStack == "" {
-		s.TUNStack = def.TUNStack
-	}
-	if s.TUNMTU <= 0 {
-		s.TUNMTU = def.TUNMTU
-	}
-	if s.TUNInterfaceName == "" {
-		s.TUNInterfaceName = def.TUNInterfaceName
-	}
-	if s.UIFontSize < 12 || s.UIFontSize > 18 {
-		s.UIFontSize = def.UIFontSize
-	}
-	if s.ThemeMode == "" {
-		s.ThemeMode = def.ThemeMode
-	}
-	if s.Language == "" {
-		s.Language = def.Language
-	}
-	if s.CloseAction == "" {
-		s.CloseAction = def.CloseAction
-	}
-	if s.ProxyMode == "" {
-		s.ProxyMode = def.ProxyMode
-	}
-	if s.GeoUpdateIntervalH <= 0 {
-		s.GeoUpdateIntervalH = def.GeoUpdateIntervalH
-	}
-	if s.GeoIPURL == "" {
-		s.GeoIPURL = def.GeoIPURL
-	}
-	if s.GeoSiteURL == "" {
-		s.GeoSiteURL = def.GeoSiteURL
-	}
-	if s.MMDBURL == "" {
-		s.MMDBURL = def.MMDBURL
-	}
-	if s.ASNURL == "" {
-		s.ASNURL = def.ASNURL
-	}
-	if strings.TrimSpace(s.SystemProxyBypass) == "" || sysproxy.IsLegacyDefaultBypass(s.SystemProxyBypass) {
-		s.SystemProxyBypass = def.SystemProxyBypass
-	}
+	s = s.WithDefaults()
 	m.mu.Lock()
 	m.settings = s
 	m.mu.Unlock()
@@ -777,108 +716,3 @@ func ParseClashInstallURL(raw string) (target, name string, ok bool) {
 	}
 	return sub.String(), strings.TrimSpace(query.Get("name")), true
 }
-
-const defaultMihomoStarterConfig = `mixed-port: 7890
-allow-lan: false
-mode: rule
-log-level: info
-external-controller: 127.0.0.1:9090
-dns:
-  enable: true
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
-  fake-ip-filter:
-    - "+.lan"
-    - "+.local"
-    - "+.ts.net"
-    - "dns.msftnsci.com"
-    - "www.msftnsci.com"
-    - "www.msftconnecttest.com"
-  proxy-server-nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
-  nameserver:
-    - https://dns.alidns.com/dns-query
-    - https://doh.pub/dns-query
-    - 223.5.5.5
-  fallback:
-    - https://dns.cloudflare.com/dns-query
-    - https://dns.google/dns-query
-  fallback-filter:
-    geoip: true
-    geoip-code: CN
-    ipcidr:
-      - 240.0.0.0/4
-  nameserver-policy:
-    "+.ts.net": system
-proxies: []
-proxy-groups:
-  - name: Proxy
-    type: select
-    proxies:
-      - DIRECT
-rules:
-  - DOMAIN-SUFFIX,ts.net,DIRECT
-  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
-  - IP-CIDR6,fd7a:115c:a1e0::/48,DIRECT,no-resolve
-  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
-  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
-  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
-  - MATCH,Proxy
-`
-
-const defaultStarterConfig = `{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "dns": {
-    "servers": [
-      { "type": "local", "tag": "dns-local" },
-      { "type": "udp", "tag": "dns-direct", "server": "223.5.5.5" },
-      { "type": "udp", "tag": "dns-remote", "server": "1.1.1.1", "detour": "proxy" }
-    ],
-    "rules": [
-      { "domain_suffix": ["ts.net"], "server": "dns-local" }
-    ],
-    "final": "dns-remote"
-  },
-  "inbounds": [
-    {
-      "type": "mixed",
-      "tag": "mixed-in",
-      "listen": "127.0.0.1",
-      "listen_port": 7890
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "selector",
-      "tag": "proxy",
-      "outbounds": ["auto", "direct"]
-    },
-    {
-      "type": "urltest",
-      "tag": "auto",
-      "outbounds": ["direct"],
-      "url": "http://www.gstatic.com/generate_204",
-      "interval": "3m"
-    },
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ],
-  "route": {
-    "default_domain_resolver": "dns-direct",
-    "rules": [
-      { "protocol": "dns", "action": "hijack-dns" },
-      { "domain_suffix": ["ts.net"], "outbound": "direct" },
-      { "ip_cidr": ["100.64.0.0/10", "fd7a:115c:a1e0::/48"], "outbound": "direct" },
-      { "ip_is_private": true, "outbound": "direct" }
-    ],
-    "final": "proxy",
-    "auto_detect_interface": true
-  }
-}
-`
