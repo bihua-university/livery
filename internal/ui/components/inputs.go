@@ -36,8 +36,8 @@ func Toggle(c *ui.Context, p theme.Palette, val *bool) ui.Element {
 // LabeledInput renders a label above a full-width single-line text input.
 func LabeledInput(c *ui.Context, p theme.Palette, s theme.TypeScale, key, label, placeholder string, val *string) ui.Element {
 	var input ui.Element
-	ui.Column(c).Grow(1).Gap(4).Children(func() {
-		ui.Text(c, label).FontSize(s.SM).TextColor(p.ForegroundSubtle).SingleLine()
+	ui.Column(c).Grow(1).MinWidth(0).Gap(4).Children(func() {
+		ui.Text(c, label).FontSize(s.XS).FontWeight(500).TextColor(p.ForegroundSubtle).SingleLine()
 		input = ui.TextInput(c.Key(key), val).Placeholder(placeholder).FillWidth()
 	})
 	return input
@@ -46,8 +46,8 @@ func LabeledInput(c *ui.Context, p theme.Palette, s theme.TypeScale, key, label,
 // LabeledSelect renders a label above a full-width select drop-down.
 func LabeledSelect(c *ui.Context, p theme.Palette, s theme.TypeScale, key, label string, val *string, options []string) ui.Element {
 	var sel ui.Element
-	ui.Column(c).Grow(1).Gap(4).Children(func() {
-		ui.Text(c, label).FontSize(s.SM).TextColor(p.ForegroundSubtle).SingleLine()
+	ui.Column(c).Grow(1).MinWidth(0).Gap(4).Children(func() {
+		ui.Text(c, label).FontSize(s.XS).FontWeight(500).TextColor(p.ForegroundSubtle).SingleLine()
 		sel = ui.Select(c.Key(key), val, options).FillWidth()
 	})
 	return sel
@@ -57,7 +57,7 @@ func LabeledSelect(c *ui.Context, p theme.Palette, s theme.TypeScale, key, label
 func SwitchRow(c *ui.Context, p theme.Palette, s theme.TypeScale, key, title, subtitle string, val *bool, badge func()) ui.Element {
 	var sw ui.Element
 	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-		ui.Column(c).Grow(1).Gap(2).Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
 			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, title).FontSize(s.Base).FontWeight(500).TextColor(p.Foreground)
 				if badge != nil {
@@ -65,7 +65,7 @@ func SwitchRow(c *ui.Context, p theme.Palette, s theme.TypeScale, key, title, su
 				}
 			})
 			if subtitle != "" {
-				ui.Text(c, subtitle).FontSize(s.XS).Font(theme.MonoFont()).TextColor(p.ForegroundSubtle).SingleLine()
+				ui.Text(c, subtitle).FontSize(s.XS).TextColor(p.ForegroundSubtle)
 			}
 		})
 		sw = Toggle(c.Key(key), p, val).Label(title)
